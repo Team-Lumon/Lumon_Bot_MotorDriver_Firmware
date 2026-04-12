@@ -334,7 +334,7 @@ void HAL_TIM_MspPostInit(TIM_HandleTypeDef* htim)
 
     __HAL_RCC_GPIOA_CLK_ENABLE();
     /**TIM2 GPIO Configuration
-    PA5     ------> TIM2_CH1
+    PA15     ------> TIM2_CH1
     */
     GPIO_InitStruct.Pin = step_Pin;
     GPIO_InitStruct.Mode = GPIO_MODE_AF_PP;

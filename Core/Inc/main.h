@@ -65,8 +65,8 @@ void Error_Handler(void);
 #define tmcTX_GPIO_Port GPIOA
 #define tmcRX_Pin GPIO_PIN_3
 #define tmcRX_GPIO_Port GPIOA
-#define step_Pin GPIO_PIN_5
-#define step_GPIO_Port GPIOA
+#define LED_Pin GPIO_PIN_5
+#define LED_GPIO_Port GPIOA
 #define S1_Pin GPIO_PIN_7
 #define S1_GPIO_Port GPIOA
 #define S2_Pin GPIO_PIN_0
@@ -77,20 +77,20 @@ void Error_Handler(void);
 #define S4_GPIO_Port GPIOB
 #define DebugTX_Pin GPIO_PIN_9
 #define DebugTX_GPIO_Port GPIOA
-#define LED_Pin GPIO_PIN_6
-#define LED_GPIO_Port GPIOC
 #define DebugRX_Pin GPIO_PIN_10
 #define DebugRX_GPIO_Port GPIOA
+#define step_Pin GPIO_PIN_15
+#define step_GPIO_Port GPIOA
 #define DIR_Pin GPIO_PIN_1
 #define DIR_GPIO_Port GPIOD
-#define MS2_Pin GPIO_PIN_2
+#define Diagnose_Pin GPIO_PIN_2
+#define Diagnose_GPIO_Port GPIOD
+#define MS2_Pin GPIO_PIN_3
 #define MS2_GPIO_Port GPIOD
 #define MS1_Pin GPIO_PIN_3
-#define MS1_GPIO_Port GPIOD
-#define Driver_disable_Pin GPIO_PIN_3
+#define MS1_GPIO_Port GPIOB
+#define Driver_disable_Pin GPIO_PIN_4
 #define Driver_disable_GPIO_Port GPIOB
-#define Diag_Pin GPIO_PIN_4
-#define Diag_GPIO_Port GPIOB
 
 /* USER CODE BEGIN Private defines */
 
