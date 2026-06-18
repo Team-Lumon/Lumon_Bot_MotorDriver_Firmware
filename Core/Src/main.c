@@ -21,7 +21,11 @@
 
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
-
+#include "can_bus.h"
+#include "debug_helper.h"
+#include "stm32g0xx_hal_gpio.h"
+#include "tmc2209.h"
+#include <stdint.h>
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -31,12 +35,30 @@
 
 /* Private define ------------------------------------------------------------*/
 /* USER CODE BEGIN PD */
+#define TMC2209_SLAVE_ADDR  0x00
+#define STEPPER_PULSE_WIDTH_MS  1U
+#define STEPPER_STEP_DELAY_MS   2U
+#define STEPPER_DIRECTION GPIO_PIN_SET
 
+#define AS5600_ADDR       (0x36 << 1)
+#define AS5600_CONF       0x07
+#define AS5600_STATUS     0x0B
+#define AS5600_RAW_ANGLE  0x0C
+#define AS5600_ANGLE      0x0E
+#define AS5600_AGC        0x1A
+#define AS5600_MAGNITUDE  0x1B
 /* USER CODE END PD */
 
 /* Private macro -------------------------------------------------------------*/
 /* USER CODE BEGIN PM */
-
+#define RUN_EVERY(interval, counter, func) \
+  do { \
+    (counter)++; \
+    if ((counter) >= (interval)) { \
+      (counter) = 0; \
+      func(); \
+    } \
+  } while (0)
 /* USER CODE END PM */
 
 /* Private variables ---------------------------------------------------------*/
@@ -52,6 +74,15 @@ UART_HandleTypeDef huart1;
 UART_HandleTypeDef huart2;
 
 /* USER CODE BEGIN PV */
+static uint32_t LED_counter;
+static uint32_t CAN_counter;
+static volatile uint8_t can_send_pending;
+static volatile uint32_t absolute_position;
+
+static TMC2209_HandleTypeDef tmc = {0};
+
+
+
 
 /* USER CODE END PV */
 
@@ -65,11 +96,235 @@ static void MX_TIM2_Init(void);
 static void MX_USART1_UART_Init(void);
 static void MX_USART2_UART_Init(void);
 /* USER CODE BEGIN PFP */
+static void Stepper_InitPins(void);
+static void Stepper_Pulse(void);
+static void PrintCanMessage(const char *prefix, const CAN_BusMessage_t *message);
+static uint16_t Encoder_ReadAnalog(void);
+static uint8_t AS5600_ReadRegister8(uint8_t reg);
+static uint16_t AS5600_ReadRegister16(uint8_t reg);
+static uint16_t AS5600_ReadConf(void);
+static uint8_t AS5600_ReadStatus(void);
+static uint8_t AS5600_ReadAgc(void);
+static uint16_t AS5600_ReadMagnitude(void);
 
 /* USER CODE END PFP */
 
 /* Private user code ---------------------------------------------------------*/
 /* USER CODE BEGIN 0 */
+uint8_t id = 16;
+
+int _write(int file, char *ptr, int len) {
+  // Retarget printf to USART2
+  HAL_UART_Transmit(&Debug_Uart, (uint8_t*)ptr, len, HAL_MAX_DELAY);
+  return len;
+}
+void LED_Toggle(void) {
+  HAL_GPIO_TogglePin(LED_GPIO_Port, LED_Pin);
+}
+uint32_t canValue = 0;
+void REQUEST_SEND_CAN(void) {
+  can_send_pending = 1U;
+}
+
+void SEND_CAN(void) {
+  if(CAN_Bus_SendU32(&CAN, CAN_ID_DEBUG, canValue) != HAL_OK) {
+    FDCAN_ProtocolStatusTypeDef protocol_status = {0};
+    (void)HAL_FDCAN_GetProtocolStatus(&CAN, &protocol_status);
+    printf("Failed to send CAN message err=0x%08lX lec=%lu bus_off=%lu\r\n",
+           (unsigned long)HAL_FDCAN_GetError(&CAN),
+           (unsigned long)protocol_status.LastErrorCode,
+           (unsigned long)protocol_status.BusOff);
+  } else {
+    printf("Sent CAN message with value: %lu\r\n", canValue);
+    canValue++;
+  }
+}
+void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim)
+{
+  if (htim->Instance == TIM2) {
+    RUN_EVERY(1000, LED_counter, LED_Toggle);
+    if(id == 0) {
+      RUN_EVERY(1000, CAN_counter, REQUEST_SEND_CAN);
+    }
+
+  }
+}
+
+void HAL_FDCAN_RxFifo0Callback(FDCAN_HandleTypeDef *fdcan_handle, uint32_t RxFifo0ITs)
+{
+    if ((fdcan_handle == &CAN) && ((RxFifo0ITs & FDCAN_IT_RX_FIFO0_NEW_MESSAGE) != 0U)) {
+      CAN_BusMessage_t message = {0};
+
+      if (CAN_Bus_Receive(&CAN, &message) == HAL_OK) {
+        PrintCanMessage("CAN RX", &message);
+
+        switch (message.id) {
+          case CAN_ID_ADC_REPORT:
+            uint32_t absolute_position = CAN_Bus_ReadU32(&message);
+            printf(absolute_position ? "ADC value: %lu\n" : "Failed to read ADC value\n", absolute_position);
+            break;
+          case CAN_ID_STATUS: {
+            char status = CAN_Bus_ReadU8(&message);
+            switch (status) {
+              case 'R':
+                printf("Resetting ....");
+                HAL_NVIC_SystemReset();
+                break;
+              default:
+                break;
+            }
+            break;
+          }
+          case CAN_ID_DEBUG:
+            printf("Debug value: %lu\r\n", (unsigned long)CAN_Bus_ReadU32(&message));
+            break;
+          default:
+            printf("Received message with unhandled ID: 0x%03lX\r\n", (unsigned long)message.id);
+            break;
+        }
+      }
+    }
+}
+
+static void PrintCanMessage(const char *prefix, const CAN_BusMessage_t *message) {
+  if ((prefix == NULL) || (message == NULL)) {
+    return;
+  }
+
+  printf("%s id=0x%03lX dlc=%u data:",
+         prefix,
+         (unsigned long)message->id,
+         message->dlc);
+
+  for (uint8_t i = 0; i < message->dlc; i++) {
+    printf(" %02X", message->data[i]);
+  }
+
+  if (message->dlc >= 4U) {
+    printf(" value_u32=%lu", (unsigned long)CAN_Bus_ReadU32(message));
+  } else if (message->dlc >= 2U) {
+    printf(" value_u16=%u", CAN_Bus_ReadU16(message));
+  } else if (message->dlc >= 1U) {
+    printf(" value_u8=%u", CAN_Bus_ReadU8(message));
+  }
+
+  printf("\r\n");
+}
+
+static void PrintHexBytes(const char *label, const uint8_t *data, uint8_t len) {
+  printf("%s[%u]:", label, len);
+  for (uint8_t i = 0; i < len; i++) {
+    printf(" %02X", data[i]);
+  }
+  printf("\r\n");
+}
+
+static void PrintTmcUartDebug(const TMC2209_UartDebugInfo *debug) {
+  printf("TMC DBG reg=0x%02X rx_status=%d read_status=%d reply=%u ofs=%u\r\n",
+         debug->last_reg,
+         debug->last_receive_status,
+         debug->last_read_status,
+         debug->last_reply_found ? 1 : 0,
+         debug->last_reply_offset);
+  PrintHexBytes("TMC TX", debug->last_tx, debug->last_tx_len);
+  PrintHexBytes("TMC RX", debug->last_rx, debug->last_rx_len);
+}
+
+static void TMC2209_ConfigUartHandle(void) {
+  tmc.huart = &tmcUart;
+  tmc.enn_port = Driver_disable_GPIO_Port;
+  tmc.enn_pin = Driver_disable_Pin;
+  tmc.slave_addr = TMC2209_SLAVE_ADDR;
+}
+
+static void Stepper_InitPins(void) {
+  GPIO_InitTypeDef GPIO_InitStruct = {0};
+
+  HAL_GPIO_WritePin(step_GPIO_Port, step_Pin, GPIO_PIN_RESET);
+  HAL_GPIO_WritePin(DIR_GPIO_Port, DIR_Pin, GPIO_PIN_RESET);
+
+  GPIO_InitStruct.Pin = step_Pin;
+  GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
+  GPIO_InitStruct.Pull = GPIO_NOPULL;
+  GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_HIGH;
+  HAL_GPIO_Init(step_GPIO_Port, &GPIO_InitStruct);
+
+  GPIO_InitStruct.Pin = DIR_Pin;
+  GPIO_InitStruct.Pull = GPIO_PULLUP;
+  HAL_GPIO_Init(DIR_GPIO_Port, &GPIO_InitStruct);
+}
+
+static void Stepper_Pulse(void) {
+  HAL_GPIO_WritePin(step_GPIO_Port, step_Pin, GPIO_PIN_SET);
+  HAL_Delay(STEPPER_PULSE_WIDTH_MS);
+  HAL_GPIO_WritePin(step_GPIO_Port, step_Pin, GPIO_PIN_RESET);
+  HAL_Delay(STEPPER_STEP_DELAY_MS);
+}
+
+static uint16_t Encoder_ReadAnalog(void) {
+  uint16_t adc_value = 0U;
+
+  HAL_ADC_Start(&hadc1);
+  if (HAL_ADC_PollForConversion(&hadc1, 10U) == HAL_OK) {
+    adc_value = (uint16_t)HAL_ADC_GetValue(&hadc1);
+  }
+  HAL_ADC_Stop(&hadc1);
+
+  return adc_value;
+}
+
+static uint8_t AS5600_ReadRegister8(uint8_t reg) {
+  uint8_t data = 0xFFU;
+
+  if (HAL_I2C_Mem_Read(&encoder_i2c,
+                       AS5600_ADDR,
+                       reg,
+                       I2C_MEMADD_SIZE_8BIT,
+                       &data,
+                       1,
+                       100) != HAL_OK) {
+    return 0xFFU;
+  }
+
+  return data;
+}
+
+static uint16_t AS5600_ReadRegister16(uint8_t reg) {
+  uint8_t data[2] = {0xFFU, 0xFFU};
+
+  if (HAL_I2C_Mem_Read(&encoder_i2c,
+                       AS5600_ADDR,
+                       reg,
+                       I2C_MEMADD_SIZE_8BIT,
+                       data,
+                       2,
+                       100) != HAL_OK) {
+    return 0xFFFFU;
+  }
+
+  return ((uint16_t)data[0] << 8) | data[1];
+}
+
+static uint16_t AS5600_ReadConf(void) {
+  return AS5600_ReadRegister16(AS5600_CONF);
+}
+
+static uint8_t AS5600_ReadStatus(void) {
+  return AS5600_ReadRegister8(AS5600_STATUS);
+}
+
+static uint8_t AS5600_ReadAgc(void) {
+  return AS5600_ReadRegister8(AS5600_AGC);
+}
+
+static uint16_t AS5600_ReadMagnitude(void) {
+  return AS5600_ReadRegister16(AS5600_MAGNITUDE);
+}
+
+uint16_t AS5600_ReadRawAngle(void)
+{
+    return AS5600_ReadRegister16(AS5600_RAW_ANGLE);
+}
 
 /* USER CODE END 0 */
 
@@ -109,16 +364,91 @@ int main(void)
   MX_USART1_UART_Init();
   MX_USART2_UART_Init();
   /* USER CODE BEGIN 2 */
+  id = (HAL_GPIO_ReadPin(S1_GPIO_Port, S1_Pin) << 3) |
+       (HAL_GPIO_ReadPin(S2_GPIO_Port, S2_Pin) << 2) |
+       (HAL_GPIO_ReadPin(S3_GPIO_Port, S3_Pin) << 1) |
+       (HAL_GPIO_ReadPin(S4_GPIO_Port, S4_Pin));
 
+  if (HAL_ADCEx_Calibration_Start(&hadc1) != HAL_OK) {
+    Error_Handler();
+  }
+
+  Stepper_InitPins();
+
+  printf("\n####################### SYSTEM DETAILS ########################\n");
+  uint32_t sys_clock_hz = HAL_RCC_GetSysClockFreq();
+  uint32_t sys_clock_mhz = sys_clock_hz / 1000000U;
+  uint32_t sys_clock_mhz_fraction =
+      ((sys_clock_hz % 1000000U) * 100U + 500000U) / 1000000U;
+
+  printf("Sys clock: %lu.%02lu MHz\n",
+         (unsigned long)sys_clock_mhz,
+         (unsigned long)sys_clock_mhz_fraction);
+  PrintTimerFrequency("TIM2(step_timer)", &htim2, 1U);
+  // PrintTimerFrequency("TIM3(ms_Timer)", &htim3, 1U);
+  printf("#################################################################\n");
+  HAL_Delay(500);
+
+  printf("\n####################### SYSTEM INIT ########################\n");
+  printf("Controller ID : ");
+  printf("%01X\n", id);
+
+  printf("ms timer init : ");
+  printf(HAL_TIM_Base_Start_IT(&ms_timer) ? "Failed\n" : "Success\n");
+  
+  printf("CAN init : ");
+  printf(CAN_Bus_Init(&CAN) ? "Failed\n" : "Success\n");
+
+  printf("User UART init : ");
+  // printf(HAL_UART_Receive_IT(&huart2, &rx, 1) ? "Failed\n" : "Success\n");
+
+  TMC2209_ConfigUartHandle();
+  printf("TMC UART init : ");
+  printf(TMC2209_Init(&tmc) ? "Failed\n" : "Success\n");
+
+  printf("TMC send delay : ");
+  printf(TMC2209_SetSendDelay(&tmc, 8) ? "Failed\n" : "Success\n");
+
+  uint32_t ioin = 0;
+  printf("TMC Check Connection : ");
+  printf(TMC2209_CheckConnection(&tmc, &ioin) ? "Failed\n" : "Success\n");
+
+  printf("\n############################################################\n\n");
+  HAL_Delay(500);
+  HAL_GPIO_WritePin(LED_GPIO_Port, LED_Pin, GPIO_PIN_SET);
+  HAL_GPIO_WritePin(Driver_disable_GPIO_Port, Driver_disable_Pin, GPIO_PIN_RESET);
+  HAL_GPIO_WritePin(DIR_GPIO_Port, DIR_Pin, STEPPER_DIRECTION);
+  HAL_Delay(1);
+    
   /* USER CODE END 2 */
-
+  
   /* Infinite loop */
   /* USER CODE BEGIN WHILE */
   while (1)
   {
+    // printf("System initializing... can_send_pending=%u\n", can_send_pending);
+    if (can_send_pending != 0U) {
+      can_send_pending = 0U;
+      SEND_CAN();
+    }
+
+    // uint16_t analog_angle = Encoder_ReadAnalog();
+    // uint16_t i2c_angle = AS5600_ReadRawAngle();
+    // uint16_t conf = AS5600_ReadConf();
+    // uint8_t status = AS5600_ReadStatus();
+    // uint8_t agc = AS5600_ReadAgc();
+    // uint16_t magnitude = AS5600_ReadMagnitude();
+
+    // printf("analog : %u\t", analog_angle);
+    // printf("I2c : %u\t", i2c_angle);
+    // printf("CONF : 0x%04X\t", conf);
+    // printf("STATUS : 0x%02X\t", status);
+    // printf("AGC : %u\t", agc);
+    // printf("MAG : %u\n", magnitude);
     /* USER CODE END WHILE */
 
     /* USER CODE BEGIN 3 */
+    // Stepper_Pulse();
   }
   /* USER CODE END 3 */
 }
@@ -245,20 +575,20 @@ static void MX_FDCAN1_Init(void)
   /* USER CODE END FDCAN1_Init 1 */
   hfdcan1.Instance = FDCAN1;
   hfdcan1.Init.ClockDivider = FDCAN_CLOCK_DIV1;
-  hfdcan1.Init.FrameFormat = FDCAN_FRAME_FD_NO_BRS;
+  hfdcan1.Init.FrameFormat = FDCAN_FRAME_CLASSIC;
   hfdcan1.Init.Mode = FDCAN_MODE_NORMAL;
   hfdcan1.Init.AutoRetransmission = ENABLE;
   hfdcan1.Init.TransmitPause = ENABLE;
   hfdcan1.Init.ProtocolException = DISABLE;
-  hfdcan1.Init.NominalPrescaler = 16;
+  hfdcan1.Init.NominalPrescaler = 8;
   hfdcan1.Init.NominalSyncJumpWidth = 1;
-  hfdcan1.Init.NominalTimeSeg1 = 1;
-  hfdcan1.Init.NominalTimeSeg2 = 1;
+  hfdcan1.Init.NominalTimeSeg1 = 13;
+  hfdcan1.Init.NominalTimeSeg2 = 2;
   hfdcan1.Init.DataPrescaler = 1;
   hfdcan1.Init.DataSyncJumpWidth = 1;
   hfdcan1.Init.DataTimeSeg1 = 1;
   hfdcan1.Init.DataTimeSeg2 = 1;
-  hfdcan1.Init.StdFiltersNbr = 0;
+  hfdcan1.Init.StdFiltersNbr = 1;
   hfdcan1.Init.ExtFiltersNbr = 0;
   hfdcan1.Init.TxFifoQueueMode = FDCAN_TX_FIFO_OPERATION;
   if (HAL_FDCAN_Init(&hfdcan1) != HAL_OK)
@@ -339,11 +669,11 @@ static void MX_TIM2_Init(void)
 
   /* USER CODE END TIM2_Init 1 */
   htim2.Instance = TIM2;
-  htim2.Init.Prescaler = 0;
+  htim2.Init.Prescaler = 64-1;
   htim2.Init.CounterMode = TIM_COUNTERMODE_UP;
-  htim2.Init.Period = 4294967295;
+  htim2.Init.Period = 1000-1;
   htim2.Init.ClockDivision = TIM_CLOCKDIVISION_DIV1;
-  htim2.Init.AutoReloadPreload = TIM_AUTORELOAD_PRELOAD_DISABLE;
+  htim2.Init.AutoReloadPreload = TIM_AUTORELOAD_PRELOAD_ENABLE;
   if (HAL_TIM_Base_Init(&htim2) != HAL_OK)
   {
     Error_Handler();
@@ -519,18 +849,25 @@ static void MX_GPIO_Init(void)
   GPIO_InitStruct.Pull = GPIO_PULLDOWN;
   HAL_GPIO_Init(GPIOB, &GPIO_InitStruct);
 
-  /*Configure GPIO pins : DIR_Pin MS2_Pin */
-  GPIO_InitStruct.Pin = DIR_Pin|MS2_Pin;
+  /*Configure GPIO pin : DIR_Pin */
+  GPIO_InitStruct.Pin = DIR_Pin;
   GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
-  GPIO_InitStruct.Pull = GPIO_NOPULL;
+  GPIO_InitStruct.Pull = GPIO_PULLUP;
   GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
-  HAL_GPIO_Init(GPIOD, &GPIO_InitStruct);
+  HAL_GPIO_Init(DIR_GPIO_Port, &GPIO_InitStruct);
 
   /*Configure GPIO pin : Diagnose_Pin */
   GPIO_InitStruct.Pin = Diagnose_Pin;
   GPIO_InitStruct.Mode = GPIO_MODE_IT_RISING;
   GPIO_InitStruct.Pull = GPIO_NOPULL;
   HAL_GPIO_Init(Diagnose_GPIO_Port, &GPIO_InitStruct);
+
+  /*Configure GPIO pin : MS2_Pin */
+  GPIO_InitStruct.Pin = MS2_Pin;
+  GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
+  GPIO_InitStruct.Pull = GPIO_NOPULL;
+  GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
+  HAL_GPIO_Init(MS2_GPIO_Port, &GPIO_InitStruct);
 
   /*Configure GPIO pins : MS1_Pin Driver_disable_Pin */
   GPIO_InitStruct.Pin = MS1_Pin|Driver_disable_Pin;
