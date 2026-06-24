@@ -36,8 +36,8 @@
 /* Private define ------------------------------------------------------------*/
 /* USER CODE BEGIN PD */
 #define TMC2209_SLAVE_ADDR  0x00
-#define STEPPER_PULSE_WIDTH_MS  1U
-#define STEPPER_STEP_DELAY_MS   2U
+#define STEPPER_TIMER_HZ  5000U
+#define STEPPER_STEP_TICK_DIVIDER  1U
 #define STEPPER_DIRECTION GPIO_PIN_SET
 
 #define AS5600_ADDR       (0x36 << 1)
@@ -76,6 +76,8 @@ UART_HandleTypeDef huart2;
 /* USER CODE BEGIN PV */
 static uint32_t LED_counter;
 static uint32_t CAN_counter;
+static uint32_t stepper_tick_counter;
+static volatile uint8_t stepper_enabled = 1U;
 static volatile uint8_t can_send_pending;
 static volatile uint32_t absolute_position;
 
@@ -97,7 +99,6 @@ static void MX_USART1_UART_Init(void);
 static void MX_USART2_UART_Init(void);
 /* USER CODE BEGIN PFP */
 static void Stepper_InitPins(void);
-static void Stepper_Pulse(void);
 static void PrintCanMessage(const char *prefix, const CAN_BusMessage_t *message);
 static uint16_t Encoder_ReadAnalog(void);
 static uint8_t AS5600_ReadRegister8(uint8_t reg);
@@ -142,9 +143,17 @@ void SEND_CAN(void) {
 void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim)
 {
   if (htim->Instance == TIM2) {
-    RUN_EVERY(1000, LED_counter, LED_Toggle);
+    RUN_EVERY(STEPPER_TIMER_HZ, LED_counter, LED_Toggle);
     if(id == 0) {
-      RUN_EVERY(1000, CAN_counter, REQUEST_SEND_CAN);
+      RUN_EVERY(STEPPER_TIMER_HZ, CAN_counter, REQUEST_SEND_CAN);
+    }
+
+    if (stepper_enabled != 0U) {
+      stepper_tick_counter++;
+      if (stepper_tick_counter >= STEPPER_STEP_TICK_DIVIDER) {
+        stepper_tick_counter = 0U;
+        HAL_GPIO_TogglePin(step_GPIO_Port, step_Pin);
+      }
     }
 
   }
@@ -252,13 +261,6 @@ static void Stepper_InitPins(void) {
   GPIO_InitStruct.Pin = DIR_Pin;
   GPIO_InitStruct.Pull = GPIO_PULLUP;
   HAL_GPIO_Init(DIR_GPIO_Port, &GPIO_InitStruct);
-}
-
-static void Stepper_Pulse(void) {
-  HAL_GPIO_WritePin(step_GPIO_Port, step_Pin, GPIO_PIN_SET);
-  HAL_Delay(STEPPER_PULSE_WIDTH_MS);
-  HAL_GPIO_WritePin(step_GPIO_Port, step_Pin, GPIO_PIN_RESET);
-  HAL_Delay(STEPPER_STEP_DELAY_MS);
 }
 
 static uint16_t Encoder_ReadAnalog(void) {
@@ -432,15 +434,15 @@ int main(void)
       SEND_CAN();
     }
 
-    // uint16_t analog_angle = Encoder_ReadAnalog();
-    // uint16_t i2c_angle = AS5600_ReadRawAngle();
-    // uint16_t conf = AS5600_ReadConf();
+    uint16_t analog_angle = Encoder_ReadAnalog();
+    uint16_t i2c_angle = AS5600_ReadRawAngle();
+    // uint16_t conf = AS5600_ReadConf();;.
     // uint8_t status = AS5600_ReadStatus();
     // uint8_t agc = AS5600_ReadAgc();
     // uint16_t magnitude = AS5600_ReadMagnitude();
 
-    // printf("analog : %u\t", analog_angle);
-    // printf("I2c : %u\t", i2c_angle);
+    printf("analog : %u\t", analog_angle);
+    printf("I2c : %u\n", i2c_angle);
     // printf("CONF : 0x%04X\t", conf);
     // printf("STATUS : 0x%02X\t", status);
     // printf("AGC : %u\t", agc);
@@ -448,7 +450,6 @@ int main(void)
     /* USER CODE END WHILE */
 
     /* USER CODE BEGIN 3 */
-    // Stepper_Pulse();
   }
   /* USER CODE END 3 */
 }
@@ -671,7 +672,7 @@ static void MX_TIM2_Init(void)
   htim2.Instance = TIM2;
   htim2.Init.Prescaler = 64-1;
   htim2.Init.CounterMode = TIM_COUNTERMODE_UP;
-  htim2.Init.Period = 1000-1;
+  htim2.Init.Period = 100-1;
   htim2.Init.ClockDivision = TIM_CLOCKDIVISION_DIV1;
   htim2.Init.AutoReloadPreload = TIM_AUTORELOAD_PRELOAD_ENABLE;
   if (HAL_TIM_Base_Init(&htim2) != HAL_OK)
