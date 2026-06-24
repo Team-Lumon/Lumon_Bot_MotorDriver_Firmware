@@ -59,6 +59,12 @@ void Error_Handler(void);
 /* USER CODE END EFP */
 
 /* Private defines -----------------------------------------------------------*/
+#define can hfdcan1
+#define encoder_i2c hi2c1
+#define debug_uart huart1
+#define tmc_uart huart2
+#define ms_timer htim2
+#define encoder_adc hadc1
 #define encoder_Pin GPIO_PIN_0
 #define encoder_GPIO_Port GPIOA
 #define tmcTX_Pin GPIO_PIN_2
