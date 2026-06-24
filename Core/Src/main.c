@@ -21,7 +21,10 @@
 
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
-
+#include <stdint.h>
+#include <stdio.h>
+#include "can_bus.h"
+#include "debug_helper.h"
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -36,6 +39,15 @@
 
 /* Private macro -------------------------------------------------------------*/
 /* USER CODE BEGIN PM */
+
+#define RUN_EVERY(interval, counter, func) \
+  do { \
+    (counter)++; \
+    if ((counter) >= (interval)) { \
+      (counter) = 0; \
+      func(); \
+    } \
+  } while (0)
 
 /* USER CODE END PM */
 
@@ -71,6 +83,32 @@ static void MX_USART2_UART_Init(void);
 /* Private user code ---------------------------------------------------------*/
 /* USER CODE BEGIN 0 */
 
+uint8_t ID = 0x0F; // Controller ID
+
+// Retarget printf to USART2
+int _write(int file, char *ptr, int len) {
+  // Retarget printf to USART2
+  HAL_UART_Transmit(&debug_uart, (uint8_t*)ptr, len, HAL_MAX_DELAY);
+  return len;
+}
+
+// #region Timer Macros
+void LED_Toggle(void) { HAL_GPIO_TogglePin(LED_GPIO_Port, LED_Pin); }
+
+// #endregion
+
+// #region Timer counters
+static uint32_t LED_TIMER = 0;
+// #endregion
+
+void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim) 
+{
+  // millisecond timer
+  if (htim->Instance == TIM2) {
+    RUN_EVERY(1000, LED_TIMER, LED_Toggle);
+
+  }
+}
 /* USER CODE END 0 */
 
 /**
@@ -109,6 +147,53 @@ int main(void)
   MX_USART1_UART_Init();
   MX_USART2_UART_Init();
   /* USER CODE BEGIN 2 */
+
+  ID = (HAL_GPIO_ReadPin(S1_GPIO_Port, S1_Pin) << 3) |
+       (HAL_GPIO_ReadPin(S2_GPIO_Port, S2_Pin) << 2) |
+       (HAL_GPIO_ReadPin(S3_GPIO_Port, S3_Pin) << 1) |
+       (HAL_GPIO_ReadPin(S4_GPIO_Port, S4_Pin));
+
+  // #region Print System Details
+  printf("\n####################### SYSTEM DETAILS ########################\n");
+  uint32_t sys_clock_hz = HAL_RCC_GetSysClockFreq();
+  uint32_t sys_clock_mhz = sys_clock_hz / 1000000U;
+  uint32_t sys_clock_mhz_fraction =
+      ((sys_clock_hz % 1000000U) * 100U + 500000U) / 1000000U;
+
+  printf("Sys clock: %lu.%02lu MHz\n",
+         (unsigned long)sys_clock_mhz,
+         (unsigned long)sys_clock_mhz_fraction);
+  PrintTimerFrequency("TIM2(step_timer)", &ms_timer, 1U);
+  // PrintTimerFrequency("TIM3(ms_Timer)", &htim3, 1U);
+  printf("#################################################################\n");
+  HAL_Delay(500);
+
+  printf("\n####################### SYSTEM INIT ########################\n");
+  printf("Controller ID : ");
+  printf("%01X\n", ID);
+
+  printf("ms timer init : ");
+  printf(HAL_TIM_Base_Start_IT(&ms_timer) ? "Failed\n" : "Success\n");
+
+  printf("CAN init : ");
+  printf(CAN_Bus_Init(&can, ID) ? "Failed\n" : "Success\n");
+
+  // printf("User UART init : ");
+  // printf(HAL_UART_Receive_IT(&huart2, &rx, 1) ? "Failed\n" : "Success\n");
+
+  // TMC2209_ConfigUartHandle();
+  // printf("TMC UART init : ");
+  // printf(TMC2209_Init(&tmc) ? "Failed\n" : "Success\n");
+
+  // printf("TMC send delay : ");
+  // printf(TMC2209_SetSendDelay(&tmc, 8) ? "Failed\n" : "Success\n");
+
+  // uint32_t ioin = 0;
+  // printf("TMC Check Connection : ");
+  // printf(TMC2209_CheckConnection(&tmc, &ioin) ? "Failed\n" : "Success\n");
+
+  printf("\n############################################################\n\n");
+  // #endregion
 
   /* USER CODE END 2 */
 
