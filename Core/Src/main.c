@@ -25,6 +25,7 @@
 #include <stdio.h>
 #include "can_bus.h"
 #include "debug_helper.h"
+#include "tmc2209.h"
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -64,6 +65,7 @@ UART_HandleTypeDef huart1;
 UART_HandleTypeDef huart2;
 
 /* USER CODE BEGIN PV */
+static TMC2209_HandleTypeDef tmc = {0};
 
 /* USER CODE END PV */
 
@@ -109,6 +111,18 @@ void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim)
 
   }
 }
+
+// #region Helper Functions
+static void TMC2209_ConfigUartHandle(void)
+{
+    tmc.huart = &tmc_uart;
+    tmc.enn_port = Driver_disable_GPIO_Port;
+    tmc.enn_pin = Driver_disable_Pin;
+    tmc.slave_addr = ID & 0x00U; // MS1/MS2 pins determine address in range 0..3
+}
+
+// #endregion
+
 /* USER CODE END 0 */
 
 /**
@@ -181,16 +195,17 @@ int main(void)
   // printf("User UART init : ");
   // printf(HAL_UART_Receive_IT(&huart2, &rx, 1) ? "Failed\n" : "Success\n");
 
-  // TMC2209_ConfigUartHandle();
-  // printf("TMC UART init : ");
-  // printf(TMC2209_Init(&tmc) ? "Failed\n" : "Success\n");
+  TMC2209_ConfigUartHandle();
+  printf("TMC UART init : ");
+  printf(TMC2209_Init(&tmc) ? "Failed\n" : "Success\n");
 
-  // printf("TMC send delay : ");
-  // printf(TMC2209_SetSendDelay(&tmc, 8) ? "Failed\n" : "Success\n");
+  printf("TMC send delay : ");
+  printf(TMC2209_SetSendDelay(&tmc, 8) ? "Failed\n" : "Success\n");
 
-  // uint32_t ioin = 0;
-  // printf("TMC Check Connection : ");
-  // printf(TMC2209_CheckConnection(&tmc, &ioin) ? "Failed\n" : "Success\n");
+  uint32_t ioin = 0;
+  printf("TMC Check Connection : ");
+  printf(TMC2209_CheckConnection(&tmc, &ioin) ? "Failed\n" : "Success\n");
+  printf("(%08lX)\n", (unsigned long)ioin);
 
   printf("\n############################################################\n\n");
   // #endregion

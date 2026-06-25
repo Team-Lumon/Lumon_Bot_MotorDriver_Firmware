@@ -38,6 +38,7 @@ add_executable(${CMAKE_PROJECT_NAME})
 add_subdirectory(cmake/stm32cubemx)
 add_subdirectory(Libs/can_bus)
 add_subdirectory(Libs/debug_helper)
+add_subdirectory(Libs/tmc2209)
 
 # Link directories setup
 target_link_directories(${CMAKE_PROJECT_NAME} PRIVATE
@@ -69,4 +70,5 @@ target_link_libraries(${CMAKE_PROJECT_NAME}
     # Add user defined libraries
     can_bus
     debug_helper
+    tmc2209
 )
