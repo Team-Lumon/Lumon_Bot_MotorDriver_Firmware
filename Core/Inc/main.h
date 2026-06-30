@@ -91,6 +91,7 @@ void Error_Handler(void);
 #define DIR_GPIO_Port GPIOD
 #define Diagnose_Pin GPIO_PIN_2
 #define Diagnose_GPIO_Port GPIOD
+#define Diagnose_EXTI_IRQn EXTI2_3_IRQn
 #define MS2_Pin GPIO_PIN_3
 #define MS2_GPIO_Port GPIOD
 #define MS1_Pin GPIO_PIN_3

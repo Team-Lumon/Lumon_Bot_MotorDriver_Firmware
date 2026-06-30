@@ -51,6 +51,7 @@ void HardFault_Handler(void);
 void SVC_Handler(void);
 void PendSV_Handler(void);
 void SysTick_Handler(void);
+void EXTI2_3_IRQHandler(void);
 void TIM2_IRQHandler(void);
 void TIM16_FDCAN_IT0_IRQHandler(void);
 void I2C1_IRQHandler(void);
