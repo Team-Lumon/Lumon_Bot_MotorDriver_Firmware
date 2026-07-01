@@ -26,6 +26,7 @@
 
 #include "can_bus.h"
 #include "debug_helper.h"
+#include "stm32g0xx_hal_tim.h"
 #include "tmc2209.h"
 #include "as5600.h"
 /* USER CODE END Includes */
@@ -62,6 +63,7 @@ FDCAN_HandleTypeDef hfdcan1;
 I2C_HandleTypeDef hi2c1;
 
 TIM_HandleTypeDef htim2;
+TIM_HandleTypeDef htim6;
 
 UART_HandleTypeDef huart1;
 UART_HandleTypeDef huart2;
@@ -80,6 +82,7 @@ static void MX_I2C1_Init(void);
 static void MX_TIM2_Init(void);
 static void MX_USART1_UART_Init(void);
 static void MX_USART2_UART_Init(void);
+static void MX_TIM6_Init(void);
 /* USER CODE BEGIN PFP */
 
 /* USER CODE END PFP */
@@ -108,7 +111,7 @@ static uint32_t LED_TIMER = 0;
 void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim) 
 {
   // millisecond timer
-  if (htim->Instance == TIM2) {
+  if (htim->Instance == TIM6) {
     RUN_EVERY(1000, LED_TIMER, LED_Toggle);
 
   }
@@ -162,6 +165,7 @@ int main(void)
   MX_TIM2_Init();
   MX_USART1_UART_Init();
   MX_USART2_UART_Init();
+  MX_TIM6_Init();
   /* USER CODE BEGIN 2 */
 
   ID = (HAL_GPIO_ReadPin(S1_GPIO_Port, S1_Pin) << 3) |
@@ -179,8 +183,8 @@ int main(void)
   printf("Sys clock: %lu.%02lu MHz\n",
          (unsigned long)sys_clock_mhz,
          (unsigned long)sys_clock_mhz_fraction);
-  PrintTimerFrequency("TIM2(step_timer)", &ms_timer, 1U);
-  // PrintTimerFrequency("TIM3(ms_Timer)", &htim3, 1U);
+  PrintTimerFrequency("TIM2(step_timer)", &step_timer, 1U);
+  PrintTimerFrequency("TIM6(ms_Timer)", &ms_timer, 1U);
   printf("#################################################################\n");
   HAL_Delay(500);
 
@@ -190,6 +194,9 @@ int main(void)
 
   printf("ms timer init : ");
   printf(HAL_TIM_Base_Start_IT(&ms_timer) ? "Failed\n" : "Success\n");
+
+  printf("step timer init : ");
+  printf(HAL_TIM_OC_Start_IT(&step_timer, TIM_CHANNEL_1) ? "Failed\n" : "Success\n");
 
   printf("CAN init : ");
   printf(CAN_Bus_Init(&can, ID) ? "Failed\n" : "Success\n");
@@ -443,7 +450,7 @@ static void MX_TIM2_Init(void)
   htim2.Instance = TIM2;
   htim2.Init.Prescaler = 64-1;
   htim2.Init.CounterMode = TIM_COUNTERMODE_UP;
-  htim2.Init.Period = 1000-1;
+  htim2.Init.Period = 0xFFFFFFFF;
   htim2.Init.ClockDivision = TIM_CLOCKDIVISION_DIV1;
   htim2.Init.AutoReloadPreload = TIM_AUTORELOAD_PRELOAD_DISABLE;
   if (HAL_TIM_Base_Init(&htim2) != HAL_OK)
@@ -465,7 +472,7 @@ static void MX_TIM2_Init(void)
   {
     Error_Handler();
   }
-  sConfigOC.OCMode = TIM_OCMODE_TIMING;
+  sConfigOC.OCMode = TIM_OCMODE_TOGGLE;
   sConfigOC.Pulse = 0;
   sConfigOC.OCPolarity = TIM_OCPOLARITY_HIGH;
   sConfigOC.OCFastMode = TIM_OCFAST_DISABLE;
@@ -477,6 +484,44 @@ static void MX_TIM2_Init(void)
 
   /* USER CODE END TIM2_Init 2 */
   HAL_TIM_MspPostInit(&htim2);
+
+}
+
+/**
+  * @brief TIM6 Initialization Function
+  * @param None
+  * @retval None
+  */
+static void MX_TIM6_Init(void)
+{
+
+  /* USER CODE BEGIN TIM6_Init 0 */
+
+  /* USER CODE END TIM6_Init 0 */
+
+  TIM_MasterConfigTypeDef sMasterConfig = {0};
+
+  /* USER CODE BEGIN TIM6_Init 1 */
+
+  /* USER CODE END TIM6_Init 1 */
+  htim6.Instance = TIM6;
+  htim6.Init.Prescaler = 64-1;
+  htim6.Init.CounterMode = TIM_COUNTERMODE_UP;
+  htim6.Init.Period = 1000-1;
+  htim6.Init.AutoReloadPreload = TIM_AUTORELOAD_PRELOAD_DISABLE;
+  if (HAL_TIM_Base_Init(&htim6) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  sMasterConfig.MasterOutputTrigger = TIM_TRGO_RESET;
+  sMasterConfig.MasterSlaveMode = TIM_MASTERSLAVEMODE_DISABLE;
+  if (HAL_TIMEx_MasterConfigSynchronization(&htim6, &sMasterConfig) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  /* USER CODE BEGIN TIM6_Init 2 */
+
+  /* USER CODE END TIM6_Init 2 */
 
 }
 
