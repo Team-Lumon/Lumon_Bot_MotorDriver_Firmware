@@ -36,7 +36,7 @@ static uint16_t AS5600_Norm(uint16_t raw) {
   return raw & 0x0FFFU;
 }
 
-static int32_t AS5600_UpdateAbs(AS5600 *enc, uint16_t raw) {
+static int32_t AS5600_UpdateAbs(AS5600_t *enc, uint16_t raw) {
   uint16_t norm = AS5600_Norm(raw);
 
   if (enc->ready == 0U) {
@@ -83,7 +83,7 @@ uint16_t AS5600_RawRead(I2C_HandleTypeDef *i2c) {
   return AS5600_Norm(AS5600_Reg16(i2c, AS5600_RAW_ANGLE));
 }
 
-void AS5600_Init(AS5600 *enc, I2C_HandleTypeDef *i2c) {
+void AS5600_Init(AS5600_t *enc, I2C_HandleTypeDef *i2c) {
   if (enc == NULL) {
     return;
   }
@@ -100,7 +100,7 @@ void AS5600_Init(AS5600 *enc, I2C_HandleTypeDef *i2c) {
   enc->error = 0U;
 }
 
-HAL_StatusTypeDef AS5600_Read(AS5600 *enc) {
+HAL_StatusTypeDef AS5600_Read(AS5600_t *enc) {
   if ((enc == NULL) || (enc->i2c == NULL) || (enc->busy != 0U)) {
     return HAL_BUSY;
   }
@@ -123,7 +123,7 @@ HAL_StatusTypeDef AS5600_Read(AS5600 *enc) {
   return status;
 }
 
-void AS5600_Done(AS5600 *enc, I2C_HandleTypeDef *i2c) {
+void AS5600_Done(AS5600_t *enc, I2C_HandleTypeDef *i2c) {
   if ((enc == NULL) || (i2c != enc->i2c)) {
     return;
   }
@@ -134,7 +134,7 @@ void AS5600_Done(AS5600 *enc, I2C_HandleTypeDef *i2c) {
   enc->error = 0U;
 }
 
-void AS5600_Fail(AS5600 *enc, I2C_HandleTypeDef *i2c) {
+void AS5600_Fail(AS5600_t *enc, I2C_HandleTypeDef *i2c) {
   if ((enc == NULL) || (i2c != enc->i2c)) {
     return;
   }
@@ -143,7 +143,7 @@ void AS5600_Fail(AS5600 *enc, I2C_HandleTypeDef *i2c) {
   enc->error = 1U;
 }
 
-uint16_t AS5600_Raw(const AS5600 *enc) {
+uint16_t AS5600_Raw(const AS5600_t *enc) {
   if (enc == NULL) {
     return 0U;
   }
@@ -151,7 +151,7 @@ uint16_t AS5600_Raw(const AS5600 *enc) {
   return enc->raw;
 }
 
-int32_t AS5600_Abs(const AS5600 *enc) {
+int32_t AS5600_Abs(const AS5600_t *enc) {
   if (enc == NULL) {
     return 0;
   }
@@ -159,14 +159,14 @@ int32_t AS5600_Abs(const AS5600 *enc) {
   return enc->abs;
 }
 
-uint8_t AS5600_Ready(const AS5600 *enc) {
+uint8_t AS5600_Ready(const AS5600_t *enc) {
   return (enc != NULL) ? enc->ready : 0U;
 }
 
-uint8_t AS5600_Busy(const AS5600 *enc) {
+uint8_t AS5600_Busy(const AS5600_t *enc) {
   return (enc != NULL) ? enc->busy : 0U;
 }
 
-uint8_t AS5600_Error(const AS5600 *enc) {
+uint8_t AS5600_Error(const AS5600_t *enc) {
   return (enc != NULL) ? enc->error : 1U;
 }

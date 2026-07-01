@@ -25,7 +25,7 @@ typedef struct {
   uint8_t ready;
   uint8_t busy;
   uint8_t error;
-} AS5600;
+} AS5600_t;
 
 /**
 @brief  Read the magnet status register of the AS5600 encoder.
@@ -42,14 +42,14 @@ uint16_t AS5600_Conf(I2C_HandleTypeDef *i2c);
 uint8_t AS5600_Agc(I2C_HandleTypeDef *i2c);
 uint16_t AS5600_Mag(I2C_HandleTypeDef *i2c);
 uint16_t AS5600_RawRead(I2C_HandleTypeDef *i2c);
-void AS5600_Init(AS5600 *enc, I2C_HandleTypeDef *i2c);
-HAL_StatusTypeDef AS5600_Read(AS5600 *enc);
-void AS5600_Done(AS5600 *enc, I2C_HandleTypeDef *i2c);
-void AS5600_Fail(AS5600 *enc, I2C_HandleTypeDef *i2c);
-uint16_t AS5600_Raw(const AS5600 *enc);
-int32_t AS5600_Abs(const AS5600 *enc);
-uint8_t AS5600_Ready(const AS5600 *enc);
-uint8_t AS5600_Busy(const AS5600 *enc);
-uint8_t AS5600_Error(const AS5600 *enc);
+void AS5600_Init(AS5600_t *enc, I2C_HandleTypeDef *i2c);
+HAL_StatusTypeDef AS5600_Read(AS5600_t *enc);
+void AS5600_Done(AS5600_t *enc, I2C_HandleTypeDef *i2c);
+void AS5600_Fail(AS5600_t *enc, I2C_HandleTypeDef *i2c);
+uint16_t AS5600_Raw(const AS5600_t *enc);
+int32_t AS5600_Abs(const AS5600_t *enc);
+uint8_t AS5600_Ready(const AS5600_t *enc);
+uint8_t AS5600_Busy(const AS5600_t *enc);
+uint8_t AS5600_Error(const AS5600_t *enc);
 
 #endif
