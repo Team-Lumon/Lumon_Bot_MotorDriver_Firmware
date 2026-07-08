@@ -29,6 +29,8 @@
 #include "stm32g0xx_hal_tim.h"
 #include "tmc2209.h"
 #include "as5600.h"
+#include "stepper_oc.h"
+#include "motor_controller.h"
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -38,6 +40,24 @@
 
 /* Private define ------------------------------------------------------------*/
 /* USER CODE BEGIN PD */
+#define MOTOR_TARGET_DELTA_COUNTS 2048.0f
+#define MOTOR_PROFILE_MAX_VELOCITY_COUNTS_S 7500.0f
+#define MOTOR_PROFILE_ACCEL_COUNTS_S2 10000.0f
+#define MOTOR_FOLLOWING_ERROR_LIMIT_COUNTS 8192.0f
+#define MOTOR_MONITOR_INTERVAL_MS 50U
+#define MOTOR_KP 10.0f
+#define MOTOR_KI 0.0f
+#define MOTOR_KD 0.0f
+#define MOTOR_SPEED_KP 10.0f
+#define MOTOR_SPEED_KI 0.0f
+#define MOTOR_SPEED_KD 0.0f
+#define MOTOR_MAX_INTEGRAL 10000.0f
+#define MOTOR_MAX_SPEED_INTEGRAL 10000.0f
+#define MOTOR_MAX_VELOCITY_STEPS_S 10000.0f
+#define MOTOR_MAX_ACCEL_STEPS_S2 100000.0f
+#define MOTOR_STEPS_PER_ENCODER_COUNT 0.78125f
+#define MOTOR_FEEDFORWARD_GAIN 0.05f
+#define MOTOR_FEEDBACK_GAIN 0.95f
 
 /* USER CODE END PD */
 
@@ -61,6 +81,7 @@ ADC_HandleTypeDef hadc1;
 FDCAN_HandleTypeDef hfdcan1;
 
 I2C_HandleTypeDef hi2c1;
+DMA_HandleTypeDef hdma_i2c1_rx;
 
 TIM_HandleTypeDef htim2;
 TIM_HandleTypeDef htim6;
@@ -70,12 +91,37 @@ UART_HandleTypeDef huart2;
 
 /* USER CODE BEGIN PV */
 static TMC2209_HandleTypeDef tmc = {0};
+AS5600_t encoder = {0};
+static MotorController_t motor = {0};
+static volatile uint8_t motor_control_ready = 0U;
+static volatile MotorFault_t motor_fault_to_print = MOTOR_FAULT_NONE;
+static const MotorControllerConfig_t motor_config = {
+  .Kp = MOTOR_KP,
+  .Ki = MOTOR_KI,
+  .Kd = MOTOR_KD,
+  .speed_Kp = MOTOR_SPEED_KP,
+  .speed_Ki = MOTOR_SPEED_KI,
+  .speed_Kd = MOTOR_SPEED_KD,
+  .max_integral = MOTOR_MAX_INTEGRAL,
+  .max_speed_integral = MOTOR_MAX_SPEED_INTEGRAL,
+  .max_velocity_steps_s = MOTOR_MAX_VELOCITY_STEPS_S,
+  .max_accel_steps_s2 = MOTOR_MAX_ACCEL_STEPS_S2,
+  .steps_per_encoder_count = MOTOR_STEPS_PER_ENCODER_COUNT,
+  .following_error_limit_counts = MOTOR_FOLLOWING_ERROR_LIMIT_COUNTS,
+  .feedforward_gain = MOTOR_FEEDFORWARD_GAIN,
+  .feedback_gain = MOTOR_FEEDBACK_GAIN,
+  .target_delta_counts = MOTOR_TARGET_DELTA_COUNTS,
+  .profile_max_velocity_counts_s = MOTOR_PROFILE_MAX_VELOCITY_COUNTS_S,
+  .profile_accel_counts_s2 = MOTOR_PROFILE_ACCEL_COUNTS_S2,
+  .monitor_interval_ms = MOTOR_MONITOR_INTERVAL_MS,
+};
 
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
 void SystemClock_Config(void);
 static void MX_GPIO_Init(void);
+static void MX_DMA_Init(void);
 static void MX_ADC1_Init(void);
 static void MX_FDCAN1_Init(void);
 static void MX_I2C1_Init(void);
@@ -108,13 +154,37 @@ void LED_Toggle(void) { HAL_GPIO_TogglePin(LED_GPIO_Port, LED_Pin); }
 static uint32_t LED_TIMER = 0;
 // #endregion
 
+void MotorController_OnFault(MotorFault_t fault)
+{
+  motor_fault_to_print = fault;
+}
+
 void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim) 
 {
   // millisecond timer
   if (htim->Instance == TIM6) {
+    if (motor_control_ready != 0U) {
+      MotorController_Service_1kHz(&motor);
+    }
+
     RUN_EVERY(1000, LED_TIMER, LED_Toggle);
 
   }
+}
+
+void HAL_TIM_OC_DelayElapsedCallback(TIM_HandleTypeDef *htim)
+{
+  Stepper_TIM_OC_Callback(htim);
+}
+
+void HAL_I2C_MemRxCpltCallback(I2C_HandleTypeDef *hi2c)
+{
+  AS5600_Done(&encoder, hi2c);
+}
+
+void HAL_I2C_ErrorCallback(I2C_HandleTypeDef *hi2c)
+{
+  AS5600_Fail(&encoder, hi2c);
 }
 
 // #region Helper Functions
@@ -159,6 +229,7 @@ int main(void)
 
   /* Initialize all configured peripherals */
   MX_GPIO_Init();
+  MX_DMA_Init();
   MX_ADC1_Init();
   MX_FDCAN1_Init();
   MX_I2C1_Init();
@@ -195,8 +266,12 @@ int main(void)
   printf("ms timer init : ");
   printf(HAL_TIM_Base_Start_IT(&ms_timer) ? "Failed\n" : "Success\n");
 
-  printf("step timer init : ");
-  printf(HAL_TIM_OC_Start_IT(&step_timer, TIM_CHANNEL_1) ? "Failed\n" : "Success\n");
+  Stepper_Init();
+  printf("stepper init : Success\n");
+
+  AS5600_Init(&encoder, &encoder_i2c);
+  printf("AS5600 first read : ");
+  printf(AS5600_Read(&encoder) ? "Failed\n" : "Started\n");
 
   printf("CAN init : ");
   printf(CAN_Bus_Init(&can, ID) ? "Failed\n" : "Success\n");
@@ -216,6 +291,30 @@ int main(void)
   printf(TMC2209_CheckConnection(&tmc, &ioin) ? "Failed\n" : "Success\n");
   printf("(%08lX)\n", (unsigned long)ioin);
 
+  MotorController_Init(&motor);
+  MotorController_ApplyConfig(&motor, &motor_config);
+  MotorController_Enable(&motor);
+  MotorController_StartRelativeProfile(&motor, MOTOR_TARGET_DELTA_COUNTS);
+  motor_control_ready = 1U;
+  printf("PID position control : Success\n");
+  printf("Kp/Ki/Kd : %ld/%ld/%ld\n",
+         (long)MOTOR_KP,
+         (long)MOTOR_KI,
+         (long)MOTOR_KD);
+  printf("feedforward/feedback gain : %ld/%ld milli\n",
+         (long)(MOTOR_FEEDFORWARD_GAIN * 1000.0f),
+         (long)(MOTOR_FEEDBACK_GAIN * 1000.0f));
+  printf("target delta : %ld counts\n",
+         (long)MOTOR_TARGET_DELTA_COUNTS);
+  printf("profile max velocity : %ld counts/s\n",
+         (long)MOTOR_PROFILE_MAX_VELOCITY_COUNTS_S);
+  printf("profile acceleration : %ld counts/s^2\n",
+         (long)MOTOR_PROFILE_ACCEL_COUNTS_S2);
+  printf("following error limit : %ld counts\n",
+         (long)MOTOR_FOLLOWING_ERROR_LIMIT_COUNTS);
+  printf("monitor interval : %lu ms\n",
+         (unsigned long)MOTOR_MONITOR_INTERVAL_MS);
+
   printf("\n############################################################\n\n");
   // #endregion
 
@@ -228,6 +327,15 @@ int main(void)
     /* USER CODE END WHILE */
 
     /* USER CODE BEGIN 3 */
+    if (motor_fault_to_print != MOTOR_FAULT_NONE) {
+      MotorFault_t fault = motor_fault_to_print;
+      motor_fault_to_print = MOTOR_FAULT_NONE;
+      printf("MOTOR FAULT: %ld\n", (long)fault);
+    }
+
+    if (MotorController_MonitorPending(&motor) != 0U) {
+      MotorController_PrintMonitor(&motor);
+    }
   }
   /* USER CODE END 3 */
 }
@@ -618,6 +726,25 @@ static void MX_USART2_UART_Init(void)
   /* USER CODE BEGIN USART2_Init 2 */
 
   /* USER CODE END USART2_Init 2 */
+
+}
+
+/**
+  * Enable DMA controller clock
+  */
+static void MX_DMA_Init(void)
+{
+
+  /* DMA controller clock enable */
+  __HAL_RCC_DMA1_CLK_ENABLE();
+
+  /* DMA interrupt init */
+  /* DMA1_Channel1_IRQn interrupt configuration */
+  HAL_NVIC_SetPriority(DMA1_Channel1_IRQn, 0, 0);
+  HAL_NVIC_EnableIRQ(DMA1_Channel1_IRQn);
+  /* DMA1_Ch4_7_DMA2_Ch1_5_DMAMUX1_OVR_IRQn interrupt configuration */
+  HAL_NVIC_SetPriority(DMA1_Ch4_7_DMA2_Ch1_5_DMAMUX1_OVR_IRQn, 0, 0);
+  HAL_NVIC_EnableIRQ(DMA1_Ch4_7_DMA2_Ch1_5_DMAMUX1_OVR_IRQn);
 
 }
 

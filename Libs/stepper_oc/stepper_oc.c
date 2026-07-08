@@ -31,6 +31,8 @@ extern TIM_HandleTypeDef htim2;
  */
 #define DIR_GPIO_PORT                  DIR_GPIO_Port
 #define DIR_GPIO_PIN                   DIR_Pin
+#define DIR_POSITIVE_LEVEL             GPIO_PIN_RESET
+#define DIR_NEGATIVE_LEVEL             GPIO_PIN_SET
 
 #define EN_GPIO_PORT                   Driver_disable_GPIO_Port
 #define EN_GPIO_PIN                    Driver_disable_Pin
@@ -71,12 +73,12 @@ static void Stepper_SetDirection(int8_t dir)
 {
     if (dir >= 0)
     {
-        HAL_GPIO_WritePin(DIR_GPIO_PORT, DIR_GPIO_PIN, GPIO_PIN_SET);
+        HAL_GPIO_WritePin(DIR_GPIO_PORT, DIR_GPIO_PIN, DIR_POSITIVE_LEVEL);
         current_dir = 1;
     }
     else
     {
-        HAL_GPIO_WritePin(DIR_GPIO_PORT, DIR_GPIO_PIN, GPIO_PIN_RESET);
+        HAL_GPIO_WritePin(DIR_GPIO_PORT, DIR_GPIO_PIN, DIR_NEGATIVE_LEVEL);
         current_dir = -1;
     }
 }
