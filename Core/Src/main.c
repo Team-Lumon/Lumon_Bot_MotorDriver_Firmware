@@ -31,6 +31,7 @@
 #include "as5600.h"
 #include "stepper_oc.h"
 #include "motor_controller.h"
+#include "queue.h"
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -137,6 +138,9 @@ static void MX_TIM6_Init(void);
 /* USER CODE BEGIN 0 */
 
 uint8_t ID = 0x0F; // Controller ID
+Queue position_queue;
+Queue velocity_queue;
+Queue tension_queue;
 
 // Retarget printf to USART2
 int _write(int file, char *ptr, int len) {
@@ -148,10 +152,27 @@ int _write(int file, char *ptr, int len) {
 // #region Timer Macros
 void LED_Toggle(void) { HAL_GPIO_TogglePin(LED_GPIO_Port, LED_Pin); }
 
+void MOTOR_STEP(void) {
+  int16_t position = 0;
+  int16_t velocity = 0;
+  uint8_t tension = 0;
+
+  if(!isEmpty(&position_queue) && !isEmpty(&velocity_queue) && !isEmpty(&tension_queue)) {
+    dequeue(&position_queue, &position);
+    dequeue(&velocity_queue, &velocity);
+    dequeue(&tension_queue, (int16_t*)&tension);
+
+    MotorController_SetTarget(&motor, position, velocity);
+  } else {
+    printf("Position, velocity, or tension queue is empty. Cannot set motor target.\n");
+  }
+ }
+
 // #endregion
 
 // #region Timer counters
 static uint32_t LED_TIMER = 0;
+static uint32_t STEP_TIMER = 0;
 // #endregion
 
 void MotorController_OnFault(MotorFault_t fault)
@@ -166,7 +187,7 @@ void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim)
     if (motor_control_ready != 0U) {
       MotorController_Service_1kHz(&motor);
     }
-
+    RUN_EVERY(100, STEP_TIMER, MOTOR_STEP);
     RUN_EVERY(1000, LED_TIMER, LED_Toggle);
 
   }
@@ -185,6 +206,37 @@ void HAL_I2C_MemRxCpltCallback(I2C_HandleTypeDef *hi2c)
 void HAL_I2C_ErrorCallback(I2C_HandleTypeDef *hi2c)
 {
   AS5600_Fail(&encoder, hi2c);
+}
+void HAL_FDCAN_RxFifo0Callback(FDCAN_HandleTypeDef *fdcan_handle, uint32_t RxFifo0ITs)
+{
+    if ((fdcan_handle == &can) && ((RxFifo0ITs & FDCAN_IT_RX_FIFO0_NEW_MESSAGE) != 0U)) {
+      CAN_BusMessage_t message = {0};
+
+      if (CAN_Bus_Receive(&can, &message) == HAL_OK) {
+        // PrintCanMessage("CAN RX", &message);
+
+        switch (CAN_Bus_GetMessageId(&message)) {
+          case CAN_ID_EMERGENCY:
+          break;
+          case CAN_ID_COMMAND: {
+            uint32_t command = CAN_Bus_ReadU32(&message);
+
+            int16_t position = (int16_t)(command & 0x000CU);
+            int16_t velocity = (int16_t)((command >> 12) & 0x000CU);
+            uint8_t tension = (uint8_t)((command >> 12) & 0x008U);
+
+            enqueue(&position_queue, position);
+            enqueue(&velocity_queue, velocity);
+            enqueue(&tension_queue, tension);
+
+            break;
+          }
+          default:
+            printf("Received message with unhandled ID: 0x%03lX\r \tPriority: 0x%03lX\n", (unsigned long)CAN_Bus_GetMessageId(&message), (unsigned long)CAN_Bus_GetPriority(&message));
+            break;
+        }
+      }
+    }
 }
 
 // #region Helper Functions
@@ -239,6 +291,10 @@ int main(void)
   MX_TIM6_Init();
   /* USER CODE BEGIN 2 */
 
+  initQueue(&position_queue);
+  initQueue(&velocity_queue);
+  initQueue(&tension_queue);
+
   ID = (HAL_GPIO_ReadPin(S1_GPIO_Port, S1_Pin) << 3) |
        (HAL_GPIO_ReadPin(S2_GPIO_Port, S2_Pin) << 2) |
        (HAL_GPIO_ReadPin(S3_GPIO_Port, S3_Pin) << 1) |
@@ -275,9 +331,6 @@ int main(void)
 
   printf("CAN init : ");
   printf(CAN_Bus_Init(&can, ID) ? "Failed\n" : "Success\n");
-
-  // printf("User UART init : ");
-  // printf(HAL_UART_Receive_IT(&huart2, &rx, 1) ? "Failed\n" : "Success\n");
 
   TMC2209_ConfigUartHandle();
   printf("TMC UART init : ");
