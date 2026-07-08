@@ -3,6 +3,7 @@
 
 #include <stdbool.h>
 #include <stddef.h>
+#include <stdint.h>
 
 #ifndef QUEUE_CAPACITY
 #define QUEUE_CAPACITY 32U
@@ -12,8 +13,10 @@
 #error "QUEUE_CAPACITY must be greater than zero"
 #endif
 
+typedef int16_t QueueValue_t;
+
 typedef struct Queue {
-    int data[QUEUE_CAPACITY];
+    QueueValue_t data[QUEUE_CAPACITY];
     size_t front;
     size_t rear;
     size_t count;
@@ -27,8 +30,8 @@ bool isFull(const Queue *q);
 size_t queueSize(const Queue *q);
 size_t queueCapacity(void);
 
-bool enqueue(Queue *q, int value);
-bool dequeue(Queue *q, int *value);
-bool peek(const Queue *q, int *value);
+bool enqueue(Queue *q, QueueValue_t value);
+bool dequeue(Queue *q, QueueValue_t *value);
+bool peek(const Queue *q, QueueValue_t *value);
 
 #endif
