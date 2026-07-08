@@ -31,6 +31,7 @@
 #include "as5600.h"
 #include "stepper_oc.h"
 #include "motor_controller.h"
+#include "tmc_stall.h"
 #include "queue.h"
 /* USER CODE END Includes */
 
@@ -94,6 +95,7 @@ UART_HandleTypeDef huart2;
 static TMC2209_HandleTypeDef tmc = {0};
 AS5600_t encoder = {0};
 static MotorController_t motor = {0};
+static TMC_Stall_t stall = {0};
 static volatile uint8_t motor_control_ready = 0U;
 static volatile MotorFault_t motor_fault_to_print = MOTOR_FAULT_NONE;
 static const MotorControllerConfig_t motor_config = {
@@ -178,6 +180,13 @@ static uint32_t STEP_TIMER = 0;
 void MotorController_OnFault(MotorFault_t fault)
 {
   motor_fault_to_print = fault;
+}
+
+void HAL_GPIO_EXTI_Rising_Callback(uint16_t GPIO_Pin)
+{
+  if (GPIO_Pin == Diagnose_Pin) {
+    TMC_Stall_DiagISR(&stall);
+  }
 }
 
 void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim) 
@@ -339,6 +348,9 @@ int main(void)
   printf("TMC send delay : ");
   printf(TMC2209_SetSendDelay(&tmc, 8) ? "Failed\n" : "Success\n");
 
+  printf("TMC StallGuard config : ");
+  printf(TMC_Stall_Init(&stall, &tmc, &motor) ? "Failed\n" : "Success\n");
+
   uint32_t ioin = 0;
   printf("TMC Check Connection : ");
   printf(TMC2209_CheckConnection(&tmc, &ioin) ? "Failed\n" : "Success\n");
@@ -383,8 +395,11 @@ int main(void)
     if (motor_fault_to_print != MOTOR_FAULT_NONE) {
       MotorFault_t fault = motor_fault_to_print;
       motor_fault_to_print = MOTOR_FAULT_NONE;
-      printf("MOTOR FAULT: %ld\n", (long)fault);
+      printf("MOTOR FAULT: %s (%ld)", MotorController_FaultName(fault), (long)fault);
+      printf("\n");
     }
+
+    TMC_Stall_Service(&stall);
 
     if (MotorController_MonitorPending(&motor) != 0U) {
       MotorController_PrintMonitor(&motor);

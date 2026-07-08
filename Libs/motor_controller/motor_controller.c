@@ -239,6 +239,19 @@ void MotorController_Disable(MotorController_t *motor)
     Stepper_Stop();
 }
 
+void MotorController_SetFault(MotorController_t *motor, MotorFault_t fault)
+{
+    if ((motor == NULL) || (fault == MOTOR_FAULT_NONE))
+    {
+        return;
+    }
+
+    motor->fault = fault;
+    motor->enabled = 0;
+    Stepper_Stop();
+    MotorController_OnFault(fault);
+}
+
 void MotorController_SetTarget(MotorController_t *motor,
                                int32_t target_position_counts,
                                float target_velocity_counts_s)
@@ -624,6 +637,27 @@ float MotorController_GetTargetSpeed(MotorController_t *motor)
 MotorFault_t MotorController_GetFault(MotorController_t *motor)
 {
     return motor->fault;
+}
+
+const char *MotorController_FaultName(MotorFault_t fault)
+{
+    switch (fault)
+    {
+        case MOTOR_FAULT_NONE:
+            return "NONE";
+        case MOTOR_FAULT_FOLLOWING_ERROR:
+            return "FOLLOWING_ERROR";
+        case MOTOR_FAULT_ENCODER_JUMP:
+            return "ENCODER_JUMP";
+        case MOTOR_FAULT_COMMAND_LIMIT:
+            return "COMMAND_LIMIT";
+        case MOTOR_FAULT_ENCODER_NOT_READY:
+            return "ENCODER_NOT_READY";
+        case MOTOR_FAULT_STALL_GUARD:
+            return "STALL_GUARD";
+        default:
+            return "UNKNOWN";
+    }
 }
 
 void MotorController_ClearFault(MotorController_t *motor)

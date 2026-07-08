@@ -10,7 +10,8 @@ typedef enum
     MOTOR_FAULT_FOLLOWING_ERROR = 1,
     MOTOR_FAULT_ENCODER_JUMP = 2,
     MOTOR_FAULT_COMMAND_LIMIT = 3,
-    MOTOR_FAULT_ENCODER_NOT_READY = 4
+    MOTOR_FAULT_ENCODER_NOT_READY = 4,
+    MOTOR_FAULT_STALL_GUARD = 5
 } MotorFault_t;
 
 typedef enum
@@ -129,6 +130,7 @@ void MotorController_ApplyConfig(MotorController_t *motor,
                                  const MotorControllerConfig_t *config);
 void MotorController_Enable(MotorController_t *motor);
 void MotorController_Disable(MotorController_t *motor);
+void MotorController_SetFault(MotorController_t *motor, MotorFault_t fault);
 
 void MotorController_SetTarget(MotorController_t *motor,
                                int32_t target_position_counts,
@@ -157,5 +159,6 @@ float MotorController_GetTargetSpeed(MotorController_t *motor);
 
 MotorFault_t MotorController_GetFault(MotorController_t *motor);
 void MotorController_ClearFault(MotorController_t *motor);
+const char *MotorController_FaultName(MotorFault_t fault);
 
 #endif
