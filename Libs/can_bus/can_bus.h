@@ -5,12 +5,14 @@
 #include <stdint.h>
 
 typedef enum {
+  CAN_ID_EMERGENCY = 0x0U,
   CAN_ID_HEARTBEAT = 0x1U,
   CAN_ID_STATUS = 0x2U,
   CAN_ID_COMMAND = 0x3U,
   CAN_ID_LED_COMMAND = 0x4U,
   CAN_ID_ADC_REPORT = 0x5U,
-  CAN_ID_DEBUG = 0x6U
+  CAN_ID_DEBUG = 0x6U,
+  CAN_MessageId_Invalid = 0xFU
 } CAN_BusMessageId_t;
 
 typedef enum {
@@ -39,6 +41,9 @@ HAL_StatusTypeDef CAN_Bus_Receive(FDCAN_HandleTypeDef *hfdcan, CAN_BusMessage_t 
 uint8_t CAN_Bus_ReadU8(const CAN_BusMessage_t *message);
 uint16_t CAN_Bus_ReadU16(const CAN_BusMessage_t *message);
 uint32_t CAN_Bus_ReadU32(const CAN_BusMessage_t *message);
+
+CAN_BusPriority_t CAN_Bus_GetPriority(const CAN_BusMessage_t *message);
+CAN_BusMessageId_t CAN_Bus_GetMessageId(const CAN_BusMessage_t *message);
 
 uint16_t CAN_Bus_makeID(uint8_t deviceId, CAN_BusMessageId_t messageId, CAN_BusPriority_t priority);
 

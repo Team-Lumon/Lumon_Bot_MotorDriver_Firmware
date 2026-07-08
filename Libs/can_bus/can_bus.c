@@ -234,3 +234,21 @@ uint32_t CAN_Bus_ReadU32(const CAN_BusMessage_t *message)
          | ((uint32_t)message->data[2] << 16)
          | ((uint32_t)message->data[3] << 24);
 }
+
+CAN_BusPriority_t CAN_Bus_GetPriority(const CAN_BusMessage_t *message)
+{
+    if (message == NULL) {
+        return CAN_Priority_VERY_LOW; // Default to lowest priority on error
+    }
+
+    return message->priority;
+}
+
+CAN_BusMessageId_t CAN_Bus_GetMessageId(const CAN_BusMessage_t *message)
+{
+    if (message == NULL) {
+        return CAN_MessageId_Invalid; // Default to invalid message ID on error
+    }
+
+    return message->messageId;
+}
