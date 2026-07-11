@@ -26,6 +26,7 @@
 
 #include "can_bus.h"
 #include "debug_helper.h"
+#include "stm32g0xx_hal_def.h"
 #include "stm32g0xx_hal_tim.h"
 #include "tmc2209.h"
 #include "as5600.h"
@@ -47,10 +48,10 @@
 #define MOTOR_PROFILE_ACCEL_COUNTS_S2 10000.0f
 #define MOTOR_FOLLOWING_ERROR_LIMIT_COUNTS 8192.0f
 #define MOTOR_MONITOR_INTERVAL_MS 50U
-#define MOTOR_KP 10.0f
+#define MOTOR_KP 0.5f
 #define MOTOR_KI 0.0f
 #define MOTOR_KD 0.0f
-#define MOTOR_SPEED_KP 10.0f
+#define MOTOR_SPEED_KP 0.0f
 #define MOTOR_SPEED_KI 0.0f
 #define MOTOR_SPEED_KD 0.0f
 #define MOTOR_MAX_INTEGRAL 10000.0f
@@ -151,6 +152,51 @@ int _write(int file, char *ptr, int len) {
   return len;
 }
 
+static void CAN_DebugPrintState(const char *label)
+{
+  FDCAN_ProtocolStatusTypeDef status = {0};
+
+  if (HAL_FDCAN_GetProtocolStatus(&can, &status) != HAL_OK) {
+    printf("CAN %s: failed to read protocol state\r\n", label);
+    return;
+  }
+
+  printf("CAN %s: hal_err=0x%08lX lec=%lu bus_off=%lu passive=%lu warning=%lu tx_free=%lu\r\n",
+         label,
+         (unsigned long)HAL_FDCAN_GetError(&can),
+         (unsigned long)status.LastErrorCode,
+         (unsigned long)status.BusOff,
+         (unsigned long)status.ErrorPassive,
+         (unsigned long)status.Warning,
+         (unsigned long)HAL_FDCAN_GetTxFifoFreeLevel(&can));
+}
+
+static void CAN_DebugPrintRx(const CAN_BusMessage_t *message)
+{
+  uint16_t raw_id;
+
+  if (message == NULL) {
+    return;
+  }
+
+  raw_id = CAN_Bus_makeID(message->deviceId,
+                          message->messageId,
+                          message->priority);
+
+  printf("CAN RX: raw=0x%03X dest=0x%X type=0x%X priority=%u dlc=%u data=",
+         raw_id,
+         message->deviceId,
+         (unsigned int)message->messageId,
+         (unsigned int)message->priority,
+         message->dlc);
+
+  for (uint8_t i = 0U; i < message->dlc; i++) {
+    printf("%02X%s", message->data[i],
+           (i + 1U < message->dlc) ? " " : "");
+  }
+  printf("\r\n");
+}
+
 // #region Timer Macros
 void LED_Toggle(void) { HAL_GPIO_TogglePin(LED_GPIO_Port, LED_Pin); }
 
@@ -164,9 +210,9 @@ void MOTOR_STEP(void) {
     dequeue(&velocity_queue, &velocity);
     dequeue(&tension_queue, (int16_t*)&tension);
 
-    MotorController_SetTarget(&motor, position, velocity);
+    // MotorController_SetTarget(&motor, position, velocity);
   } else {
-    printf("Position, velocity, or tension queue is empty. Cannot set motor target.\n");
+    // printf("Position, velocity, or tension queue is empty. Cannot set motor target.\n");
   }
  }
 
@@ -222,7 +268,7 @@ void HAL_FDCAN_RxFifo0Callback(FDCAN_HandleTypeDef *fdcan_handle, uint32_t RxFif
       CAN_BusMessage_t message = {0};
 
       if (CAN_Bus_Receive(&can, &message) == HAL_OK) {
-        // PrintCanMessage("CAN RX", &message);
+        CAN_DebugPrintRx(&message);
 
         switch (CAN_Bus_GetMessageId(&message)) {
           case CAN_ID_EMERGENCY:
@@ -240,10 +286,19 @@ void HAL_FDCAN_RxFifo0Callback(FDCAN_HandleTypeDef *fdcan_handle, uint32_t RxFif
 
             break;
           }
+          case CAN_ID_SYNC: {
+            uint32_t sync_value = CAN_Bus_ReadU32(&message);
+            printf("Received SYNC message with value: %lu\n",
+                   (unsigned long)sync_value);
+            MotorController_SetRelativeTarget(&motor, (int32_t)sync_value, 0.0f);
+            break;
+          }
           default:
             printf("Received message with unhandled ID: 0x%03lX\r \tPriority: 0x%03lX\n", (unsigned long)CAN_Bus_GetMessageId(&message), (unsigned long)CAN_Bus_GetPriority(&message));
             break;
         }
+      } else {
+        CAN_DebugPrintState("RX read failed");
       }
     }
 }
@@ -339,7 +394,11 @@ int main(void)
   printf(AS5600_Read(&encoder) ? "Failed\n" : "Started\n");
 
   printf("CAN init : ");
-  printf(CAN_Bus_Init(&can, ID) ? "Failed\n" : "Success\n");
+  HAL_StatusTypeDef can_init_status = CAN_Bus_Init(&can, ID);
+  printf(can_init_status != HAL_OK ? "Failed\n" : "Success\n");
+  printf("CAN filters: local destination=0x%X, broadcast destination=0x%X, mask=0x00F\r\n",
+         ID, CAN_BROADCAST_ID);
+  CAN_DebugPrintState("after init");
 
   TMC2209_ConfigUartHandle();
   printf("TMC UART init : ");
@@ -359,30 +418,29 @@ int main(void)
   MotorController_Init(&motor);
   MotorController_ApplyConfig(&motor, &motor_config);
   MotorController_Enable(&motor);
-  MotorController_StartRelativeProfile(&motor, MOTOR_TARGET_DELTA_COUNTS);
   motor_control_ready = 1U;
   printf("PID position control : Success\n");
-  printf("Kp/Ki/Kd : %ld/%ld/%ld\n",
-         (long)MOTOR_KP,
-         (long)MOTOR_KI,
-         (long)MOTOR_KD);
-  printf("feedforward/feedback gain : %ld/%ld milli\n",
-         (long)(MOTOR_FEEDFORWARD_GAIN * 1000.0f),
-         (long)(MOTOR_FEEDBACK_GAIN * 1000.0f));
-  printf("target delta : %ld counts\n",
-         (long)MOTOR_TARGET_DELTA_COUNTS);
-  printf("profile max velocity : %ld counts/s\n",
-         (long)MOTOR_PROFILE_MAX_VELOCITY_COUNTS_S);
-  printf("profile acceleration : %ld counts/s^2\n",
-         (long)MOTOR_PROFILE_ACCEL_COUNTS_S2);
-  printf("following error limit : %ld counts\n",
-         (long)MOTOR_FOLLOWING_ERROR_LIMIT_COUNTS);
-  printf("monitor interval : %lu ms\n",
-         (unsigned long)MOTOR_MONITOR_INTERVAL_MS);
+  printf("Kp/Ki/Kd : %ld/%ld/%ld milli\n",
+         (long)(MOTOR_KP * 1000.0f),
+         (long)(MOTOR_KI * 1000.0f),
+         (long)(MOTOR_KD * 1000.0f));
 
   printf("\n############################################################\n\n");
   // #endregion
 
+  uint32_t pos = 4096;
+  HAL_Delay(2000);
+  if (ID == 0) {
+    HAL_StatusTypeDef sync_tx_status =
+        CAN_Bus_SendU32(&can, CAN_BROADCAST_ID, CAN_ID_SYNC,
+                        CAN_Priority_VERY_HIGH, pos);
+    printf(sync_tx_status != HAL_OK
+               ? "CAN TX SYNC failed: dest=0xF value=%lu\r\n"
+               : "CAN TX SYNC queued: dest=0xF value=%lu\r\n",
+           (unsigned long)pos);
+    CAN_DebugPrintState("after SYNC TX");
+    MotorController_SetRelativeTarget(&motor, pos, 0.0f);
+  }
   /* USER CODE END 2 */
 
   /* Infinite loop */
@@ -395,15 +453,14 @@ int main(void)
     if (motor_fault_to_print != MOTOR_FAULT_NONE) {
       MotorFault_t fault = motor_fault_to_print;
       motor_fault_to_print = MOTOR_FAULT_NONE;
-      printf("MOTOR FAULT: %s (%ld)", MotorController_FaultName(fault), (long)fault);
-      printf("\n");
+      printf("MOTOR FAULT: %s (%ld)\n",
+             MotorController_FaultName(fault),
+             (long)fault);
     }
 
-    TMC_Stall_Service(&stall);
-
-    if (MotorController_MonitorPending(&motor) != 0U) {
-      MotorController_PrintMonitor(&motor);
-    }
+    // if (MotorController_MonitorPending(&motor) != 0U) {
+    //   MotorController_PrintMonitor(&motor);
+    // }
   }
   /* USER CODE END 3 */
 }
@@ -543,7 +600,7 @@ static void MX_FDCAN1_Init(void)
   hfdcan1.Init.DataSyncJumpWidth = 1;
   hfdcan1.Init.DataTimeSeg1 = 1;
   hfdcan1.Init.DataTimeSeg2 = 1;
-  hfdcan1.Init.StdFiltersNbr = 1;
+  hfdcan1.Init.StdFiltersNbr = 2;
   hfdcan1.Init.ExtFiltersNbr = 0;
   hfdcan1.Init.TxFifoQueueMode = FDCAN_TX_FIFO_OPERATION;
   if (HAL_FDCAN_Init(&hfdcan1) != HAL_OK)
@@ -810,9 +867,6 @@ static void MX_DMA_Init(void)
   /* DMA1_Channel1_IRQn interrupt configuration */
   HAL_NVIC_SetPriority(DMA1_Channel1_IRQn, 0, 0);
   HAL_NVIC_EnableIRQ(DMA1_Channel1_IRQn);
-  /* DMA1_Ch4_7_DMA2_Ch1_5_DMAMUX1_OVR_IRQn interrupt configuration */
-  HAL_NVIC_SetPriority(DMA1_Ch4_7_DMA2_Ch1_5_DMAMUX1_OVR_IRQn, 0, 0);
-  HAL_NVIC_EnableIRQ(DMA1_Ch4_7_DMA2_Ch1_5_DMAMUX1_OVR_IRQn);
 
 }
 

@@ -4,12 +4,14 @@
 #include "main.h"
 #include <stdint.h>
 
+#define CAN_BROADCAST_ID 0x00FU
+
 typedef enum {
   CAN_ID_EMERGENCY = 0x0U,
   CAN_ID_HEARTBEAT = 0x1U,
   CAN_ID_STATUS = 0x2U,
   CAN_ID_COMMAND = 0x3U,
-  CAN_ID_LED_COMMAND = 0x4U,
+  CAN_ID_SYNC = 0x4U,
   CAN_ID_ADC_REPORT = 0x5U,
   CAN_ID_DEBUG = 0x6U,
   CAN_MessageId_Invalid = 0xFU

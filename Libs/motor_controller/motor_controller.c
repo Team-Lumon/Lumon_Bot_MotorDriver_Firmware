@@ -142,7 +142,8 @@ void MotorController_Init(MotorController_t *motor)
     motor->profile_target_delta_counts = 2048.0f;
     motor->profile_max_velocity_counts_s = 7500.0f;
     motor->profile_accel_counts_s2 = 10000.0f;
-    motor->profile_state = MOTOR_PROFILE_WAIT_ENCODER;
+    /* Stay idle until a target/profile is explicitly requested. */
+    motor->profile_state = MOTOR_PROFILE_HOLDING;
 
     motor->monitor_interval_ms = 50U;
     motor->monitor_timer_ms = 0U;
@@ -265,8 +266,16 @@ void MotorController_SetRelativeTarget(MotorController_t *motor,
                                        int32_t delta_counts,
                                        float target_velocity_counts_s)
 {
+    int32_t current_position_counts = 0;
+
+    if (!MotorController_ReadEncoder(motor, &current_position_counts))
+    {
+        Stepper_Stop();
+        return;
+    }
+
     motor->mode = MOTOR_CONTROL_POSITION;
-    motor->target_position_counts += delta_counts;
+    motor->target_position_counts = current_position_counts + delta_counts;
     motor->target_velocity_counts_s = target_velocity_counts_s;
 }
 
@@ -543,9 +552,6 @@ static void MotorController_UpdateProfileTarget(MotorController_t *motor)
 
         case MOTOR_PROFILE_HOLDING:
         default:
-            MotorController_SetTarget(motor,
-                                      round_float_to_int(motor->profile_final_counts),
-                                      0.0f);
             break;
     }
 }

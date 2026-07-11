@@ -94,16 +94,25 @@ HAL_StatusTypeDef CAN_Bus_Init(FDCAN_HandleTypeDef *hfdcan, uint8_t device_id)
 {
     FDCAN_FilterTypeDef filter = {0};
 
-    if (hfdcan == NULL) {
+    if ((hfdcan == NULL) || (device_id > 0x0FU)) {
         return HAL_ERROR;
     }
 
+    /* Match only destination bits 3:0; ignore priority and message ID. */
     filter.IdType = FDCAN_STANDARD_ID;
-    filter.FilterIndex = 0;
     filter.FilterType = FDCAN_FILTER_MASK;
     filter.FilterConfig = FDCAN_FILTER_TO_RXFIFO0;
-    filter.FilterID1 = CAN_Bus_makeID(device_id, CAN_ID_DEBUG, CAN_Priority_MEDIUM) & 0x00FU;   //Look for the device ID
-    filter.FilterID2 = 0x00FU;  //Filter out the Priority and Message ID bits
+    filter.FilterIndex = 0;
+    filter.FilterID1 = device_id;
+    filter.FilterID2 = 0x00FU;
+
+    if (HAL_FDCAN_ConfigFilter(hfdcan, &filter) != HAL_OK) {
+        return HAL_ERROR;
+    }
+
+    /* Match broadcast destination 0xF using the same lower-four-bit mask. */
+    filter.FilterIndex = 1;
+    filter.FilterID1 = CAN_BROADCAST_ID;
 
     if (HAL_FDCAN_ConfigFilter(hfdcan, &filter) != HAL_OK) {
         return HAL_ERROR;
