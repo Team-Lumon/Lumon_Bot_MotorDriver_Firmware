@@ -44,6 +44,40 @@ static int32_t round_float_to_int(float value)
                              (int32_t)(value - 0.5f);
 }
 
+static void MotorController_ResetPidMovingAverage(MotorController_t *motor)
+{
+    motor->pid_moving_avg_sum = 0.0f;
+    motor->pid_moving_avg_index = 0U;
+    motor->pid_moving_avg_count = 0U;
+    for (uint8_t i = 0U; i < MOTOR_PID_MOVING_AVG_SIZE; i++)
+    {
+        motor->pid_moving_avg_samples[i] = 0.0f;
+    }
+}
+
+static float MotorController_AveragePidOutput(MotorController_t *motor,
+                                              float raw_output)
+{
+    if (motor->pid_moving_avg_count < MOTOR_PID_MOVING_AVG_SIZE)
+    {
+        motor->pid_moving_avg_count++;
+    }
+    else
+    {
+        motor->pid_moving_avg_sum -=
+            motor->pid_moving_avg_samples[motor->pid_moving_avg_index];
+    }
+
+    motor->pid_moving_avg_samples[motor->pid_moving_avg_index] = raw_output;
+    motor->pid_moving_avg_sum += raw_output;
+    motor->pid_moving_avg_index =
+        (uint8_t)((motor->pid_moving_avg_index + 1U) %
+                  MOTOR_PID_MOVING_AVG_SIZE);
+
+    return motor->pid_moving_avg_sum /
+           (float)motor->pid_moving_avg_count;
+}
+
 static void MotorController_RequestEncoderSample(void)
 {
     if (!AS5600_Busy(&encoder))
@@ -101,10 +135,10 @@ void MotorController_Init(MotorController_t *motor)
      */
     motor->max_integral = 10000.0f;
     motor->max_speed_integral = 10000.0f;
-    motor->max_velocity_steps_s = 10000.0f;
-    motor->max_accel_steps_s2 = 100000.0f;
+    motor->max_velocity_steps_s = 20000.0f;
+    motor->max_accel_steps_s2 = 200000.0f;
 
-    motor->steps_per_encoder_count = 3200.0/4096.0f; // 3200 steps per rev, 4096 counts per rev
+    motor->steps_per_encoder_count = 6400.0f / 4096.0f;
     motor->feedforward_gain = 0.05f;
     motor->feedback_gain = 0.95f;
 
@@ -129,7 +163,9 @@ void MotorController_Init(MotorController_t *motor)
     motor->last_p_term_counts_s = 0.0f;
     motor->last_i_term_counts_s = 0.0f;
     motor->last_d_term_counts_s = 0.0f;
+    motor->last_raw_pid_output_counts_s = 0.0f;
     motor->last_correction_counts_s = 0.0f;
+    MotorController_ResetPidMovingAverage(motor);
     motor->last_velocity_cmd_counts_s = 0.0f;
 
     motor->mode = MOTOR_CONTROL_SPEED;
@@ -157,6 +193,7 @@ void MotorController_Init(MotorController_t *motor)
     motor->monitor_p_counts_s = 0.0f;
     motor->monitor_i_counts_s = 0.0f;
     motor->monitor_d_counts_s = 0.0f;
+    motor->monitor_raw_pid_output_counts_s = 0.0f;
     motor->monitor_correction_counts_s = 0.0f;
     motor->monitor_command_counts_s = 0.0f;
     motor->monitor_state = MOTOR_PROFILE_WAIT_ENCODER;
@@ -210,7 +247,9 @@ void MotorController_Enable(MotorController_t *motor)
     motor->last_p_term_counts_s = 0.0f;
     motor->last_i_term_counts_s = 0.0f;
     motor->last_d_term_counts_s = 0.0f;
+    motor->last_raw_pid_output_counts_s = 0.0f;
     motor->last_correction_counts_s = 0.0f;
+    MotorController_ResetPidMovingAverage(motor);
     motor->last_velocity_cmd_counts_s = 0.0f;
     motor->actual_speed_counts_s = 0.0f;
     motor->speed_initialized = 0U;
@@ -262,6 +301,32 @@ void MotorController_SetTarget(MotorController_t *motor,
     motor->target_velocity_counts_s = target_velocity_counts_s;
 }
 
+void MotorController_SetTimedTarget(MotorController_t *motor,
+                                    int32_t target_position_counts,
+                                    float move_time_s)
+{
+    float required_velocity_counts_s = 0.0f;
+
+    if ((motor == NULL) || (move_time_s <= 0.0f))
+    {
+        return;
+    }
+
+    /*
+     * The AS5600-updated position is the feedback reference.  The velocity
+     * below is feed-forward: the speed needed to remove the measured
+     * distance during the command interval.  The 1 kHz PID loop then corrects
+     * tracking error while this target is active.
+     */
+    required_velocity_counts_s =
+        (float)(target_position_counts - motor->actual_position_counts) /
+        move_time_s;
+
+    MotorController_SetTarget(motor,
+                              target_position_counts,
+                              required_velocity_counts_s);
+}
+
 void MotorController_SetRelativeTarget(MotorController_t *motor,
                                        int32_t delta_counts,
                                        float target_velocity_counts_s)
@@ -311,7 +376,9 @@ void MotorController_HoldCurrentPosition(MotorController_t *motor)
     motor->last_p_term_counts_s = 0.0f;
     motor->last_i_term_counts_s = 0.0f;
     motor->last_d_term_counts_s = 0.0f;
+    motor->last_raw_pid_output_counts_s = 0.0f;
     motor->last_correction_counts_s = 0.0f;
+    MotorController_ResetPidMovingAverage(motor);
     motor->last_velocity_cmd_counts_s = 0.0f;
 
     Stepper_Stop();
@@ -372,8 +439,11 @@ void MotorController_Update_1kHz(MotorController_t *motor)
     }
 
     int32_t delta_counts = actual_pos - motor->previous_position_counts;
+    float raw_speed_counts_s;
+
     motor->previous_position_counts = actual_pos;
-    motor->actual_speed_counts_s = (float)delta_counts / motor->dt;
+    raw_speed_counts_s = (float)delta_counts / motor->dt;
+    motor->actual_speed_counts_s = raw_speed_counts_s;
 
     if (motor->mode == MOTOR_CONTROL_SPEED)
     {
@@ -396,10 +466,14 @@ void MotorController_Update_1kHz(MotorController_t *motor)
             motor->speed_Ki * motor->speed_integral;
         motor->last_d_term_counts_s =
             motor->speed_Kd * speed_derivative;
-        motor->last_correction_counts_s =
+        float raw_pid_output_counts_s =
             motor->last_p_term_counts_s +
             motor->last_i_term_counts_s +
             motor->last_d_term_counts_s;
+        motor->last_raw_pid_output_counts_s = raw_pid_output_counts_s;
+        motor->last_correction_counts_s =
+            MotorController_AveragePidOutput(motor,
+                                             raw_pid_output_counts_s);
         motor->last_velocity_cmd_counts_s =
             motor->target_speed_counts_s + motor->last_correction_counts_s;
 
@@ -443,10 +517,14 @@ void MotorController_Update_1kHz(MotorController_t *motor)
     motor->last_p_term_counts_s = motor->Kp * error_counts;
     motor->last_i_term_counts_s = motor->Ki * motor->integral;
     motor->last_d_term_counts_s = motor->Kd * derivative;
-    motor->last_correction_counts_s =
+    float raw_pid_output_counts_s =
         motor->last_p_term_counts_s +
         motor->last_i_term_counts_s +
         motor->last_d_term_counts_s;
+    motor->last_raw_pid_output_counts_s = raw_pid_output_counts_s;
+    motor->last_correction_counts_s =
+        MotorController_AveragePidOutput(motor,
+                                         raw_pid_output_counts_s);
 
     /*
      * Feed-forward velocity from trajectory generator/CAN command.
@@ -577,6 +655,8 @@ static void MotorController_UpdateMonitor(MotorController_t *motor)
         motor->monitor_p_counts_s = motor->last_p_term_counts_s;
         motor->monitor_i_counts_s = motor->last_i_term_counts_s;
         motor->monitor_d_counts_s = motor->last_d_term_counts_s;
+        motor->monitor_raw_pid_output_counts_s =
+            motor->last_raw_pid_output_counts_s;
         motor->monitor_correction_counts_s = motor->last_correction_counts_s;
         motor->monitor_command_counts_s = motor->last_velocity_cmd_counts_s;
         motor->monitor_state = motor->profile_state;
@@ -604,7 +684,7 @@ uint8_t MotorController_MonitorPending(MotorController_t *motor)
 
 void MotorController_PrintMonitor(MotorController_t *motor)
 {
-    printf("motor mon: state=%ld target=%ld actual=%ld err=%ld target_v=%ld speed=%ld accel=%ld p=%ld i=%ld d=%ld corr=%ld cmd=%ld\n",
+    printf("motor mon: state=%ld target=%ld actual=%ld err=%ld target_v=%ld speed=%ld accel=%ld p=%ld i=%ld d=%ld corr=%ld pid_before_avg=%ld pid_after_avg=%ld cmd=%ld\n",
            (long)motor->monitor_state,
            (long)motor->monitor_target_counts,
            (long)motor->monitor_actual_counts,
@@ -615,6 +695,8 @@ void MotorController_PrintMonitor(MotorController_t *motor)
            (long)motor->monitor_p_counts_s,
            (long)motor->monitor_i_counts_s,
            (long)motor->monitor_d_counts_s,
+           (long)motor->monitor_correction_counts_s,
+           (long)motor->monitor_raw_pid_output_counts_s,
            (long)motor->monitor_correction_counts_s,
            (long)motor->monitor_command_counts_s);
 }

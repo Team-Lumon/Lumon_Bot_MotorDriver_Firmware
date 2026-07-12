@@ -4,6 +4,8 @@
 #include "main.h"
 #include <stdint.h>
 
+#define MOTOR_PID_MOVING_AVG_SIZE 100U
+
 typedef enum
 {
     MOTOR_FAULT_NONE = 0,
@@ -92,7 +94,12 @@ typedef struct
     float last_p_term_counts_s;
     float last_i_term_counts_s;
     float last_d_term_counts_s;
+    float last_raw_pid_output_counts_s;
     float last_correction_counts_s;
+    float pid_moving_avg_samples[MOTOR_PID_MOVING_AVG_SIZE];
+    float pid_moving_avg_sum;
+    uint8_t pid_moving_avg_index;
+    uint8_t pid_moving_avg_count;
     float last_velocity_cmd_counts_s;
 
     MotorControlMode_t mode;
@@ -119,6 +126,7 @@ typedef struct
     float monitor_p_counts_s;
     float monitor_i_counts_s;
     float monitor_d_counts_s;
+    float monitor_raw_pid_output_counts_s;
     float monitor_correction_counts_s;
     float monitor_command_counts_s;
     MotorProfileState_t monitor_state;
@@ -135,6 +143,10 @@ void MotorController_SetFault(MotorController_t *motor, MotorFault_t fault);
 void MotorController_SetTarget(MotorController_t *motor,
                                int32_t target_position_counts,
                                float target_velocity_counts_s);
+
+void MotorController_SetTimedTarget(MotorController_t *motor,
+                                    int32_t target_position_counts,
+                                    float move_time_s);
 
 void MotorController_SetRelativeTarget(MotorController_t *motor,
                                        int32_t delta_counts,
