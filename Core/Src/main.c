@@ -21,6 +21,7 @@
 
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
+#include <stdbool.h>
 #include <stdint.h>
 #include <stdio.h>
 
@@ -28,6 +29,7 @@
 #include "debug_helper.h"
 #include "stm32g0xx_hal_def.h"
 #include "stm32g0xx_hal_tim.h"
+#include "stm32g0xx_hal_uart.h"
 #include "tmc2209.h"
 #include "as5600.h"
 #include "stepper_oc.h"
@@ -44,11 +46,11 @@
 /* Private define ------------------------------------------------------------*/
 /* USER CODE BEGIN PD */
 #define MOTOR_TARGET_DELTA_COUNTS 2048.0f
-#define MOTOR_PROFILE_MAX_VELOCITY_COUNTS_S 7500.0f
-#define MOTOR_PROFILE_ACCEL_COUNTS_S2 10000.0f
+#define MOTOR_PROFILE_MAX_VELOCITY_COUNTS_S 100000.0f
+#define MOTOR_PROFILE_ACCEL_COUNTS_S2 100000.0f
 #define MOTOR_FOLLOWING_ERROR_LIMIT_COUNTS 8192.0f
 #define MOTOR_MONITOR_INTERVAL_MS 50U
-#define MOTOR_KP 0.5f
+#define MOTOR_KP 1.4f
 #define MOTOR_KI 0.0f
 #define MOTOR_KD 0.0f
 #define MOTOR_SPEED_KP 0.0f
@@ -61,6 +63,8 @@
 #define MOTOR_STEPS_PER_ENCODER_COUNT 0.78125f
 #define MOTOR_FEEDFORWARD_GAIN 0.05f
 #define MOTOR_FEEDBACK_GAIN 0.95f
+#define MOTOR_COMMAND_INTERVAL_MS 100U
+#define MOTOR_COMMAND_INTERVAL_S  0.100f
 
 /* USER CODE END PD */
 
@@ -93,12 +97,15 @@ UART_HandleTypeDef huart1;
 UART_HandleTypeDef huart2;
 
 /* USER CODE BEGIN PV */
+static uint8_t debug_rx_char;
 static TMC2209_HandleTypeDef tmc = {0};
 AS5600_t encoder = {0};
 static MotorController_t motor = {0};
 static TMC_Stall_t stall = {0};
 static volatile uint8_t motor_control_ready = 0U;
 static volatile MotorFault_t motor_fault_to_print = MOTOR_FAULT_NONE;
+static volatile int32_t can_position_target_counts = 0;
+static volatile uint8_t can_position_target_pending = 0U;
 static const MotorControllerConfig_t motor_config = {
   .Kp = MOTOR_KP,
   .Ki = MOTOR_KI,
@@ -445,11 +452,30 @@ int main(void)
 
   /* Infinite loop */
   /* USER CODE BEGIN WHILE */
+  bool monitor = true;
   while (1)
   {
     /* USER CODE END WHILE */
 
     /* USER CODE BEGIN 3 */
+
+    if (HAL_UART_Receive(&debug_uart, &debug_rx_char, 1, 0) == HAL_OK) {
+      switch (debug_rx_char) {
+        case 'R':
+          NVIC_SystemReset();
+          break;
+        case 'D':
+          Stepper_Disable();
+          break;
+        case 'E':
+          Stepper_Enable();
+          break;
+        case 'S':
+          monitor = false;
+          break;
+      }
+    }
+
     if (motor_fault_to_print != MOTOR_FAULT_NONE) {
       MotorFault_t fault = motor_fault_to_print;
       motor_fault_to_print = MOTOR_FAULT_NONE;
@@ -458,9 +484,9 @@ int main(void)
              (long)fault);
     }
 
-    // if (MotorController_MonitorPending(&motor) != 0U) {
-    //   MotorController_PrintMonitor(&motor);
-    // }
+    if (MotorController_MonitorPending(&motor) != 0U && monitor) {
+      MotorController_PrintMonitor(&motor);
+    }
   }
   /* USER CODE END 3 */
 }
