@@ -2,6 +2,8 @@
 
 #include "main.h"
 
+#include <stdio.h>
+
 static uint32_t queueEnterCritical(void) {
     uint32_t primask = __get_PRIMASK();
     __disable_irq();
@@ -12,6 +14,19 @@ static void queueExitCritical(uint32_t primask) {
     if (primask == 0U) {
         __enable_irq();
     }
+}
+
+static void printQueueValue(QueueValue_t value) {
+    int32_t scaled = (value >= 0.0f) ? (int32_t)(value * 1000.0f + 0.5f)
+                                     : (int32_t)(value * 1000.0f - 0.5f);
+    uint32_t magnitude = (scaled < 0) ? (uint32_t)(-(int64_t)scaled)
+                                      : (uint32_t)scaled;
+
+    if (scaled < 0) {
+        printf("-");
+    }
+    printf("%lu.%03lu", (unsigned long)(magnitude / 1000U),
+           (unsigned long)(magnitude % 1000U));
 }
 
 void initQueue(Queue *q) {
@@ -123,4 +138,32 @@ bool peek(const Queue *q, QueueValue_t *value) {
     queueExitCritical(primask);
 
     return true;
+}
+
+void printQueue(const Queue *q) {
+    QueueValue_t values[QUEUE_CAPACITY];
+    size_t count;
+
+    if (q == NULL) {
+        printf("Queue: NULL\r\n");
+        return;
+    }
+
+    /* Take a consistent snapshot, then print with interrupts enabled. */
+    uint32_t primask = queueEnterCritical();
+    count = q->count;
+    for (size_t i = 0U; i < count; i++) {
+        values[i] = q->data[(q->front + i) % QUEUE_CAPACITY];
+    }
+    queueExitCritical(primask);
+
+    printf("Queue (%lu/%lu): [", (unsigned long)count,
+           (unsigned long)QUEUE_CAPACITY);
+    for (size_t i = 0U; i < count; i++) {
+        if (i != 0U) {
+            printf(", ");
+        }
+        printQueueValue(values[i]);
+    }
+    printf("]\r\n");
 }

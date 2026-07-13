@@ -6,14 +6,14 @@
 #include <stdint.h>
 
 #ifndef QUEUE_CAPACITY
-#define QUEUE_CAPACITY 32U
+#define QUEUE_CAPACITY 1024U
 #endif
 
 #if QUEUE_CAPACITY == 0U
 #error "QUEUE_CAPACITY must be greater than zero"
 #endif
 
-typedef int16_t QueueValue_t;
+typedef float QueueValue_t;
 
 typedef struct Queue {
     QueueValue_t data[QUEUE_CAPACITY];
@@ -33,5 +33,6 @@ size_t queueCapacity(void);
 bool enqueue(Queue *q, QueueValue_t value);
 bool dequeue(Queue *q, QueueValue_t *value);
 bool peek(const Queue *q, QueueValue_t *value);
+void printQueue(const Queue *q);
 
 #endif

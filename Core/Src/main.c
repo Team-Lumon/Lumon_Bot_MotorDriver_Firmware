@@ -27,6 +27,7 @@
 
 #include "can_bus.h"
 #include "debug_helper.h"
+#include "stm32g0xx_hal.h"
 #include "stm32g0xx_hal_def.h"
 #include "stm32g0xx_hal_tim.h"
 #include "stm32g0xx_hal_uart.h"
@@ -70,6 +71,7 @@
 
 #define SAMPLE_COUNT 151
 #define CABLE_COUNT 8
+#define HOST_CAN_ID 0U
 #define DRUM_DIAMETER_MM 5.0f
 #define PI_F 3.14159265358979323846f
 #define ENCODER_COUNTS_PER_REV 4096.0f
@@ -110,7 +112,7 @@ UART_HandleTypeDef huart2;
 static uint8_t debug_rx_char;
 static TMC2209_HandleTypeDef tmc = {0};
 AS5600_t encoder = {0};
-static MotorController_t motor = {0};
+static MotorController_t motor_controller = {0};
 static TMC_Stall_t stall = {0};
 static volatile uint8_t motor_control_ready = 0U;
 static volatile MotorFault_t motor_fault_to_print = MOTOR_FAULT_NONE;
@@ -154,6 +156,8 @@ static void MX_USART1_UART_Init(void);
 static void MX_USART2_UART_Init(void);
 static void MX_TIM6_Init(void);
 /* USER CODE BEGIN PFP */
+
+static void PrintFloat3(float value);
 
 /* USER CODE END PFP */
 
@@ -684,11 +688,16 @@ static void CAN_DebugPrintRx(const CAN_BusMessage_t *message)
 // #region Timer Macros
 void LED_Toggle(void) { HAL_GPIO_TogglePin(LED_GPIO_Port, LED_Pin); }
 
+/* Dataset column and destination CAN device ID (valid range: 0..7). */
+ uint8_t motor = 3U;
+ uint16_t time = 0;
+
 void MOTOR_STEP(void) {
   float delta_counts;
   int32_t target_counts;
 
-  if ((profile_active == 0U) || (ID >= CABLE_COUNT)) {
+  if ((profile_active == 0U) || (ID != HOST_CAN_ID) ||
+      (motor >= CABLE_COUNT)) {
     return;
   }
 
@@ -697,25 +706,89 @@ void MOTOR_STEP(void) {
     return;
   }
 
-  /* The hardware ID selects one of the eight cable-profile columns. */
-  delta_counts = cable_length_delta_mm[profile_sample_index][ID] *
+  /* Host ID 0 follows the same selected dataset column as the remote motor. */
+  delta_counts = cable_length_delta_mm[profile_sample_index][motor] *
                  ENCODER_COUNTS_PER_MM*10;
   target_counts = profile_origin_counts +
                   ((delta_counts >= 0.0f)
                        ? (int32_t)(delta_counts + 0.5f)
                        : (int32_t)(delta_counts - 0.5f));
 
-  MotorController_SetTimedTarget(&motor,
+  MotorController_SetTimedTarget(&motor_controller,
                                  target_counts,
                                  MOTOR_COMMAND_INTERVAL_S);
   profile_sample_index++;
  }
+ 
 
+ static int16_t EncodeSigned12(float value) {
+   int32_t rounded = (value >= 0.0f) ? (int32_t)(value + 0.5f)
+                                     : (int32_t)(value - 0.5f);
+
+   if (rounded > 2047) {
+     rounded = 2047;
+   } else if (rounded < -2048) {
+     rounded = -2048;
+   }
+
+   return (int16_t)rounded;
+ }
+
+ static uint8_t EncodeUnsigned8(float value) {
+   int32_t rounded = (value >= 0.0f) ? (int32_t)(value + 0.5f) : 0;
+
+   if (rounded > 255) {
+     rounded = 255;
+   }
+
+   return (uint8_t)rounded;
+ }
+
+ void CAN_SEND(void) {
+   if ((ID == 0) && (time < SAMPLE_COUNT) && (motor < CABLE_COUNT)) {
+     uint32_t command;
+     uint16_t position_bits;
+     uint16_t velocity_bits;
+     uint8_t tension;
+
+     position_bits = (uint16_t)EncodeSigned12(cable_length_delta_mm[time][motor] * 10.0f) & 0x0FFFU;
+     velocity_bits = (uint16_t)EncodeSigned12(cable_velocity_mm_s[time][motor] * 10.0f) & 0x0FFFU;
+     tension = EncodeUnsigned8(cable_tension_n[time][motor] * 10.0f);
+
+     command = ((uint32_t)tension << 24) | ((uint32_t)velocity_bits << 12) |
+               (uint32_t)position_bits;
+    //  printf("Sending command : %lu\n", command);
+
+     if (CAN_Bus_SendU32(&can, motor, CAN_ID_COMMAND,
+                         CAN_Priority_MEDIUM, command) != HAL_OK) {
+       CAN_DebugPrintState("TX send failed");
+     }
+     time++;
+   }
+ }
+ uint16_t syncID = 0;
+ void SYNC(void) {
+   if (ID == HOST_CAN_ID) {
+     HAL_StatusTypeDef stat =
+         CAN_Bus_SendU8(&can, motor, CAN_ID_SYNC, CAN_Priority_MEDIUM, syncID);
+     if (stat == HAL_OK) {
+       /* Move the host only when the remote SYNC was queued successfully. */
+       MOTOR_STEP();
+       syncID++;
+      //  printf("SYNC sent OK\r\n");
+     } else {
+       printf("SYNC send failed\r\n");
+       CAN_DebugPrintState("SYNC send failed");
+     }
+   }
+  }
 // #endregion
 
 // #region Timer counters
 static uint32_t LED_TIMER = 0;
 static uint32_t STEP_TIMER = 0;
+static uint32_t CAN_TIMER = 0;
+static uint32_t SYNC_TIMER = 0;
 // #endregion
 
 void MotorController_OnFault(MotorFault_t fault)
@@ -735,10 +808,12 @@ void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim)
   // millisecond timer
   if (htim->Instance == TIM6) {
     if (motor_control_ready != 0U) {
-      MotorController_Service_1kHz(&motor);
+      MotorController_Service_1kHz(&motor_controller);
     }
-    RUN_EVERY(MOTOR_COMMAND_INTERVAL_MS, STEP_TIMER, MOTOR_STEP);
+    // RUN_EVERY(MOTOR_COMMAND_INTERVAL_MS, STEP_TIMER, MOTOR_STEP);
     RUN_EVERY(1000, LED_TIMER, LED_Toggle);
+    RUN_EVERY(2, CAN_TIMER, CAN_SEND);
+    RUN_EVERY(100, SYNC_TIMER, SYNC);
 
   }
 }
@@ -763,7 +838,7 @@ void HAL_FDCAN_RxFifo0Callback(FDCAN_HandleTypeDef *fdcan_handle, uint32_t RxFif
       CAN_BusMessage_t message = {0};
 
       if (CAN_Bus_Receive(&can, &message) == HAL_OK) {
-        CAN_DebugPrintRx(&message);
+        // CAN_DebugPrintRx(&message);
 
         switch (CAN_Bus_GetMessageId(&message)) {
           // case CAN_ID_EMERGENCY:
@@ -772,7 +847,7 @@ void HAL_FDCAN_RxFifo0Callback(FDCAN_HandleTypeDef *fdcan_handle, uint32_t RxFif
             uint32_t command = CAN_Bus_ReadU32(&message);
             // uint32_t command = 0b000000010100000000001111000000001010;
 
-            printf("Received message with command: %lu\n", (unsigned long)command);
+            // printf("Received message with command: %lu\n", (unsigned long)command);
 
             uint16_t position_bits = (uint16_t)(command & 0x0FFFU);
             uint16_t velocity_bits = (uint16_t)((command >> 12) & 0x0FFFU);
@@ -785,24 +860,57 @@ void HAL_FDCAN_RxFifo0Callback(FDCAN_HandleTypeDef *fdcan_handle, uint32_t RxFif
                                    : (int16_t)velocity_bits;
             uint8_t tension = (uint8_t)((command >> 24) & 0xFFU);
 
-            printf("Received COMMAND message: position=%d, velocity=%d, tension=%u\n",
-                   position, velocity, tension);
+            // printf("Received COMMAND message: position=%d, velocity=%d, tension=%u\n",
+            //        position, velocity, tension);
 
-            // enqueue(&position_queue, position);
-            // enqueue(&velocity_queue, velocity);
-            // enqueue(&tension_queue, tension);
+            enqueue(&position_queue, position/10.0f);
+            enqueue(&velocity_queue, velocity/10.0f);
+            enqueue(&tension_queue, tension/10.0f);
 
             break;
           }
           case CAN_ID_SYNC: {
-            uint32_t sync_value = CAN_Bus_ReadU32(&message);
-            /*
-             * SYNC payload is an absolute signed 32-bit encoder position.
-             * Only the newest command is retained; this prevents an old FIFO
-             * backlog from making the motor follow stale positions.
-             */
-            can_position_target_counts = (int32_t)sync_value;
-            can_position_target_pending = 1U;
+            uint32_t sync_value = CAN_Bus_ReadU8(&message);
+
+            float position;
+            float velocity;
+            float tension;
+            if (dequeue(&position_queue, &position) &&
+                dequeue(&velocity_queue, &velocity) &&
+                dequeue(&tension_queue, &tension)) {
+              // printf("SYNC %lu: dequeue pos=", (unsigned long)sync_value);
+              // PrintFloat3(position);
+              // printf(", vel=");
+              // PrintFloat3(velocity);
+              // printf(", ten=");
+              // PrintFloat3(tension);
+              // printf("\r\n");
+              float delta_counts;
+              int32_t target_counts;
+
+              if ((profile_active == 0U) || (ID >= CABLE_COUNT)) {
+                return;
+              }
+
+              if (profile_sample_index >= SAMPLE_COUNT) {
+                profile_active = 0U;
+                return;
+              }
+
+              /* The hardware ID selects one of the eight cable-profile columns. */
+              delta_counts = position * ENCODER_COUNTS_PER_MM*10;
+              target_counts = profile_origin_counts +
+                              ((delta_counts >= 0.0f)
+                                  ? (int32_t)(delta_counts + 0.5f)
+                                  : (int32_t)(delta_counts - 0.5f));
+
+      MotorController_SetTimedTarget(&motor_controller,
+                                            target_counts,
+                                            MOTOR_COMMAND_INTERVAL_S);
+              profile_sample_index++;
+            } else {
+              // printf("SYNC received, but a command queue is empty\r\n");
+            }
             break;
           }
           default:
@@ -816,6 +924,20 @@ void HAL_FDCAN_RxFifo0Callback(FDCAN_HandleTypeDef *fdcan_handle, uint32_t RxFif
 }
 
 // #region Helper Functions
+static void PrintFloat3(float value)
+{
+    int32_t scaled = (value >= 0.0f) ? (int32_t)(value * 1000.0f + 0.5f)
+                                     : (int32_t)(value * 1000.0f - 0.5f);
+    uint32_t magnitude = (scaled < 0) ? (uint32_t)(-(int64_t)scaled)
+                                      : (uint32_t)scaled;
+
+    if (scaled < 0) {
+        printf("-");
+    }
+    printf("%lu.%03lu", (unsigned long)(magnitude / 1000U),
+           (unsigned long)(magnitude % 1000U));
+}
+
 static void TMC2209_ConfigUartHandle(void)
 {
     tmc.huart = &tmc_uart;
@@ -894,6 +1016,10 @@ int main(void)
   printf("\n####################### SYSTEM INIT ########################\n");
   printf("Controller ID : ");
   printf("%01X\n", ID);
+  if (ID == 0U) {
+    printf("Transmit motor: %u (dataset column %u, CAN destination 0x%X)\r\n",
+           motor, motor, motor);
+  }
 
   printf("ms timer init : ");
   printf(HAL_TIM_Base_Start_IT(&ms_timer) ? "Failed\n" : "Success\n");
@@ -927,19 +1053,19 @@ int main(void)
              : "Success\n");
 
   printf("TMC StallGuard config : ");
-  printf(TMC_Stall_Init(&stall, &tmc, &motor) ? "Failed\n" : "Success\n");
+  printf(TMC_Stall_Init(&stall, &tmc, &motor_controller) ? "Failed\n" : "Success\n");
 
   uint32_t ioin = 0;
   printf("TMC Check Connection : ");
   printf(TMC2209_CheckConnection(&tmc, &ioin) ? "Failed\n" : "Success\n");
   printf("(%08lX)\n", (unsigned long)ioin);
 
-  MotorController_Init(&motor);
-  MotorController_ApplyConfig(&motor, &motor_config);
-  MotorController_Enable(&motor);
+  MotorController_Init(&motor_controller);
+  MotorController_ApplyConfig(&motor_controller, &motor_config);
+  MotorController_Enable(&motor_controller);
   motor_control_ready = 1U;
   if (ID < CABLE_COUNT) {
-    profile_origin_counts = MotorController_GetActualPosition(&motor);
+    profile_origin_counts = MotorController_GetActualPosition(&motor_controller);
     profile_sample_index = 0U;
     profile_active = 1U;
     printf("Profile started: cable=%u, samples=%u, interval=100 ms\n",
@@ -961,7 +1087,7 @@ int main(void)
 
   /* Infinite loop */
   /* USER CODE BEGIN WHILE */
-  bool monitor = true;
+  bool monitor = false;
   while (1)
   {
     /* USER CODE END WHILE */
@@ -980,7 +1106,7 @@ int main(void)
           Stepper_Enable();
           break;
         case 'S':
-          monitor = false;
+          monitor = !monitor;
           break;
       }
     }
@@ -993,9 +1119,13 @@ int main(void)
              (long)fault);
     }
 
-    if (MotorController_MonitorPending(&motor) != 0U && monitor) {
-      MotorController_PrintMonitor(&motor);
+    if (MotorController_MonitorPending(&motor_controller) != 0U && monitor) {
+      MotorController_PrintMonitor(&motor_controller);
     }
+    printf("size: %lu/%lu\r\n",
+       (unsigned long)queueSize(&position_queue),
+       (unsigned long)queueCapacity());
+    HAL_Delay(1000);
   }
   /* USER CODE END 3 */
 }
