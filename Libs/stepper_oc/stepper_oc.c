@@ -213,10 +213,21 @@ void Stepper_TIM_OC_Callback(TIM_HandleTypeDef *htim)
      * This gives less jitter accumulation than scheduling from CNT.
      */
     uint32_t old_ccr = __HAL_TIM_GET_COMPARE(htim, STEP_TIMER_CHANNEL);
+    uint32_t now = __HAL_TIM_GET_COUNTER(htim);
+    uint32_t next_ccr = old_ccr + half_period_ticks;
 
-    __HAL_TIM_SET_COMPARE(htim,
-                          STEP_TIMER_CHANNEL,
-                          old_ccr + half_period_ticks);
+    /*
+     * An interrupt with equal or higher priority may delay this callback.
+     * If the intended compare time has already passed, scheduling it would
+     * stall the 32-bit timer until counter wrap. Resume from the current
+     * counter value instead.
+     */
+    if ((int32_t)(next_ccr - now) <= 0)
+    {
+        next_ccr = now + half_period_ticks;
+    }
+
+    __HAL_TIM_SET_COMPARE(htim, STEP_TIMER_CHANNEL, next_ccr);
 
     /*
      * Optional internal tracking only.

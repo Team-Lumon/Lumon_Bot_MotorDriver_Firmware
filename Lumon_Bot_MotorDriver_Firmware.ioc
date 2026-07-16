@@ -101,6 +101,7 @@ NVIC.SysTick_IRQn=true\:3\:0\:false\:false\:true\:false\:true\:false
 NVIC.TIM16_FDCAN_IT0_IRQn=true\:0\:0\:false\:false\:true\:true\:true\:true
 NVIC.TIM2_IRQn=true\:0\:0\:false\:false\:true\:true\:true\:true
 NVIC.TIM6_DAC_LPTIM1_IRQn=true\:0\:0\:false\:false\:true\:true\:true\:true
+NVIC.USART1_IRQn=true\:2\:0\:true\:false\:true\:true\:true\:true
 PA0.GPIOParameters=GPIO_Label
 PA0.GPIO_Label=encoder
 PA0.Mode=IN0
