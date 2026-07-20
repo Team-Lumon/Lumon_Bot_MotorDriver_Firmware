@@ -918,20 +918,14 @@ void HAL_FDCAN_RxFifo0Callback(FDCAN_HandleTypeDef *fdcan_handle, uint32_t RxFif
               float delta_counts;
               int32_t target_counts;
 
-              if (profile_active == 0U) {
-                return;
-              }
-
-              if (profile_sample_index >= SAMPLE_COUNT) {
-                profile_active = 0U;
-                return;
-              }
-
               /*
                * Each CAN position is the displacement since the previous
                * 100 ms sample, not an absolute offset from startup.
                */
               delta_counts = position * ENCODER_COUNTS_PER_MM;
+              printf("deque delta: ");
+              PrintFloat3(delta_counts);
+              printf("\r\n");
               can_target_counts_accumulator += delta_counts;
               target_counts = (can_target_counts_accumulator >= 0.0f)
                                   ? (int32_t)(can_target_counts_accumulator + 0.5f)
@@ -940,9 +934,8 @@ void HAL_FDCAN_RxFifo0Callback(FDCAN_HandleTypeDef *fdcan_handle, uint32_t RxFif
       MotorController_SetTimedTarget(&motor_controller,
                                             target_counts,
                                             MOTOR_COMMAND_INTERVAL_S);
-              profile_sample_index++;
             } else {
-              // printf("SYNC received, but a command queue is empty\r\n");
+              printf("SYNC received, but a command queue is empty\r\n");
             }
             break;
           }
@@ -960,7 +953,7 @@ void HAL_FDCAN_RxFifo0Callback(FDCAN_HandleTypeDef *fdcan_handle, uint32_t RxFif
           }
           }
         } else {
-        CAN_DebugPrintState("RX read failed");
+        // CAN_DebugPrintState("RX read failed");
       }
     }
 }
