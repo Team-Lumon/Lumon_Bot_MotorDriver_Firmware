@@ -115,6 +115,7 @@ static volatile uint8_t debug_rx_pending = 0U;
 static TMC2209_HandleTypeDef tmc = {0};
 AS5600_t encoder = {0};
 static volatile bool encoderReadoutReq = false;
+static volatile bool encoderReadoutReady = false;
 static MotorController_t motor_controller = {0};
 static TMC_Stall_t stall = {0};
 static volatile uint8_t motor_control_ready = 0U;
@@ -831,6 +832,9 @@ void HAL_TIM_OC_DelayElapsedCallback(TIM_HandleTypeDef *htim)
 void HAL_I2C_MemRxCpltCallback(I2C_HandleTypeDef *hi2c)
 {
   AS5600_Done(&encoder, hi2c);
+  if ((hi2c == encoder.i2c) && encoderReadoutReq) {
+    encoderReadoutReady = true;
+  }
 }
 
 void HAL_I2C_ErrorCallback(I2C_HandleTypeDef *hi2c)
@@ -880,6 +884,7 @@ void HAL_FDCAN_RxFifo0Callback(FDCAN_HandleTypeDef *fdcan_handle, uint32_t RxFif
                 NVIC_SystemReset();
                 break;
               case 0x02:
+                encoderReadoutReady = false;
                 encoderReadoutReq = true;
                 break;
             }
@@ -1158,12 +1163,21 @@ int main(void)
     }
 
     if (encoderReadoutReq) {
-      encoderReadoutReq = false;
-      (void)CAN_Bus_SendU16(&can,
-                            HOST_CAN_ID,
-                            CAN_ID_ENCODER,
-                            CAN_Priority_MEDIUM,
-                            AS5600_Raw(&encoder));
+      if (encoderReadoutReady) {
+        uint16_t encoderData =
+            ((uint16_t)(ID & 0x0FU) << 12) |
+            (AS5600_Raw(&encoder) & 0x0FFFU);
+
+        encoderReadoutReq = false;
+        encoderReadoutReady = false;
+        (void)CAN_Bus_SendU16(&can,
+                              HOST_CAN_ID,
+                              CAN_ID_ENCODER,
+                              CAN_Priority_MEDIUM,
+                              encoderData);
+      } else if (!AS5600_Busy(&encoder)) {
+        (void)AS5600_Read(&encoder);
+      }
     }
 
     if (motor_fault_to_print != MOTOR_FAULT_NONE) {
