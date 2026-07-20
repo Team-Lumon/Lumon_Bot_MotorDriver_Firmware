@@ -114,6 +114,7 @@ static volatile uint8_t debug_rx_char;
 static volatile uint8_t debug_rx_pending = 0U;
 static TMC2209_HandleTypeDef tmc = {0};
 AS5600_t encoder = {0};
+static volatile bool encoderReadoutReq = false;
 static MotorController_t motor_controller = {0};
 static TMC_Stall_t stall = {0};
 static volatile uint8_t motor_control_ready = 0U;
@@ -877,6 +878,10 @@ void HAL_FDCAN_RxFifo0Callback(FDCAN_HandleTypeDef *fdcan_handle, uint32_t RxFif
               case 0x01:
                 printf("Reset command received\n");
                 NVIC_SystemReset();
+                break;
+              case 0x02:
+                encoderReadoutReq = true;
+                break;
             }
             break;
           }
@@ -1150,6 +1155,15 @@ int main(void)
           monitor = !monitor;
           break;
       }
+    }
+
+    if (encoderReadoutReq) {
+      encoderReadoutReq = false;
+      (void)CAN_Bus_SendU16(&can,
+                            HOST_CAN_ID,
+                            CAN_ID_ENCODER,
+                            CAN_Priority_MEDIUM,
+                            AS5600_Raw(&encoder));
     }
 
     if (motor_fault_to_print != MOTOR_FAULT_NONE) {
