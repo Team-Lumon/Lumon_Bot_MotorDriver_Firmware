@@ -59,6 +59,13 @@ void Error_Handler(void);
 /* USER CODE END EFP */
 
 /* Private defines -----------------------------------------------------------*/
+#define can hfdcan1
+#define step_timer htim2
+#define tmc_uart huart2
+#define encoder_adc hadc1
+#define encoder_i2c hi2c1
+#define debug_uart huart1
+#define ms_timer htim6
 #define encoder_Pin GPIO_PIN_0
 #define encoder_GPIO_Port GPIOA
 #define tmcTX_Pin GPIO_PIN_2
@@ -85,6 +92,7 @@ void Error_Handler(void);
 #define DIR_GPIO_Port GPIOD
 #define Diagnose_Pin GPIO_PIN_2
 #define Diagnose_GPIO_Port GPIOD
+#define Diagnose_EXTI_IRQn EXTI2_3_IRQn
 #define MS2_Pin GPIO_PIN_3
 #define MS2_GPIO_Port GPIOD
 #define MS1_Pin GPIO_PIN_3
