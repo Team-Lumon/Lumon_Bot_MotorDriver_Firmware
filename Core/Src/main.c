@@ -21,6 +21,23 @@
 
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
+#include <stdbool.h>
+#include <stdint.h>
+#include <stdio.h>
+
+#include "can_bus.h"
+#include "debug_helper.h"
+#include "stm32g0xx_hal.h"
+#include "stm32g0xx_hal_def.h"
+#include "stm32g0xx_hal_tim.h"
+#include "stm32g0xx_hal_uart.h"
+#include "tmc2209.h"
+#include "as5600.h"
+#include "stepper_oc.h"
+#include "motor_controller.h"
+#include "tmc_stall.h"
+#include "queue.h"
+#include <stddef.h>
 
 /* USER CODE END Includes */
 
@@ -31,11 +48,46 @@
 
 /* Private define ------------------------------------------------------------*/
 /* USER CODE BEGIN PD */
+#define MOTOR_TARGET_DELTA_COUNTS 2048.0f
+#define MOTOR_PROFILE_MAX_VELOCITY_COUNTS_S 100000.0f
+#define MOTOR_PROFILE_ACCEL_COUNTS_S2 100000.0f
+#define MOTOR_FOLLOWING_ERROR_LIMIT_COUNTS 8192.0f
+#define MOTOR_MONITOR_INTERVAL_MS 50U
+#define MOTOR_KP 1.4f
+#define MOTOR_KI 0.0f
+#define MOTOR_KD 0.0f
+#define MOTOR_SPEED_KP 0.0f
+#define MOTOR_SPEED_KI 0.0f
+#define MOTOR_SPEED_KD 0.0f
+#define MOTOR_MAX_INTEGRAL 10000.0f
+#define MOTOR_MAX_SPEED_INTEGRAL 10000.0f
+#define MOTOR_MAX_VELOCITY_STEPS_S 20000.0f
+#define MOTOR_MAX_ACCEL_STEPS_S2 200000.0f
+#define MOTOR_STEPS_PER_ENCODER_COUNT 1.5625f
+#define MOTOR_FEEDFORWARD_GAIN 1.0f
+#define MOTOR_FEEDBACK_GAIN 1.0f
+#define MOTOR_COMMAND_INTERVAL_S 0.100f
+
+#define HOST_CAN_ID 0U
+#define DRUM_DIAMETER_MM 5.0f
+#define PI_F 3.14159265358979323846f
+#define ENCODER_COUNTS_PER_REV 4096.0f
+#define ENCODER_COUNTS_PER_MM \
+  (ENCODER_COUNTS_PER_REV / (PI_F * DRUM_DIAMETER_MM))
 
 /* USER CODE END PD */
 
 /* Private macro -------------------------------------------------------------*/
 /* USER CODE BEGIN PM */
+
+#define RUN_EVERY(interval, counter, func) \
+  do { \
+    (counter)++; \
+    if ((counter) >= (interval)) { \
+      (counter) = 0; \
+      func(); \
+    } \
+  } while (0)
 
 /* USER CODE END PM */
 
@@ -45,31 +97,323 @@ ADC_HandleTypeDef hadc1;
 FDCAN_HandleTypeDef hfdcan1;
 
 I2C_HandleTypeDef hi2c1;
+DMA_HandleTypeDef hdma_i2c1_rx;
 
 TIM_HandleTypeDef htim2;
+TIM_HandleTypeDef htim6;
 
 UART_HandleTypeDef huart1;
 UART_HandleTypeDef huart2;
 
 /* USER CODE BEGIN PV */
+static uint8_t debug_uart_rx_byte;
+static volatile uint8_t debug_rx_char;
+static volatile uint8_t debug_rx_pending = 0U;
+static TMC2209_HandleTypeDef tmc = {0};
+AS5600_t encoder = {0};
+static volatile bool encoderReadoutReq = false;
+static volatile bool encoderReadoutReady = false;
+static MotorController_t motor_controller = {0};
+static TMC_Stall_t stall = {0};
+static volatile uint8_t motor_control_ready = 0U;
+static volatile MotorFault_t motor_fault_to_print = MOTOR_FAULT_NONE;
+static float can_target_counts_accumulator = 0.0f;
+static const MotorControllerConfig_t motor_config = {
+  .Kp = MOTOR_KP,
+  .Ki = MOTOR_KI,
+  .Kd = MOTOR_KD,
+  .speed_Kp = MOTOR_SPEED_KP,
+  .speed_Ki = MOTOR_SPEED_KI,
+  .speed_Kd = MOTOR_SPEED_KD,
+  .max_integral = MOTOR_MAX_INTEGRAL,
+  .max_speed_integral = MOTOR_MAX_SPEED_INTEGRAL,
+  .max_velocity_steps_s = MOTOR_MAX_VELOCITY_STEPS_S,
+  .max_accel_steps_s2 = MOTOR_MAX_ACCEL_STEPS_S2,
+  .steps_per_encoder_count = MOTOR_STEPS_PER_ENCODER_COUNT,
+  .following_error_limit_counts = MOTOR_FOLLOWING_ERROR_LIMIT_COUNTS,
+  .feedforward_gain = MOTOR_FEEDFORWARD_GAIN,
+  .feedback_gain = MOTOR_FEEDBACK_GAIN,
+  .target_delta_counts = MOTOR_TARGET_DELTA_COUNTS,
+  .profile_max_velocity_counts_s = MOTOR_PROFILE_MAX_VELOCITY_COUNTS_S,
+  .profile_accel_counts_s2 = MOTOR_PROFILE_ACCEL_COUNTS_S2,
+  .monitor_interval_ms = MOTOR_MONITOR_INTERVAL_MS,
+};
 
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
 void SystemClock_Config(void);
 static void MX_GPIO_Init(void);
+static void MX_DMA_Init(void);
 static void MX_ADC1_Init(void);
 static void MX_FDCAN1_Init(void);
 static void MX_I2C1_Init(void);
 static void MX_TIM2_Init(void);
 static void MX_USART1_UART_Init(void);
 static void MX_USART2_UART_Init(void);
+static void MX_TIM6_Init(void);
 /* USER CODE BEGIN PFP */
+
+static void PrintFloat3(float value);
 
 /* USER CODE END PFP */
 
 /* Private user code ---------------------------------------------------------*/
 /* USER CODE BEGIN 0 */
+
+
+uint8_t ID = 0x0F; // Controller ID
+Queue position_queue;
+Queue velocity_queue;
+Queue tension_queue;
+
+// Retarget printf to USART2
+int _write(int file, char *ptr, int len) {
+  // Retarget printf to USART2
+  HAL_UART_Transmit(&debug_uart, (uint8_t*)ptr, len, HAL_MAX_DELAY);
+  return len;
+}
+
+static void CAN_DebugPrintState(const char *label)
+{
+  FDCAN_ProtocolStatusTypeDef status = {0};
+
+  if (HAL_FDCAN_GetProtocolStatus(&can, &status) != HAL_OK) {
+    printf("CAN %s: failed to read protocol state\r\n", label);
+    return;
+  }
+
+  printf("CAN %s: hal_err=0x%08lX lec=%lu bus_off=%lu passive=%lu warning=%lu tx_free=%lu\r\n",
+         label,
+         (unsigned long)HAL_FDCAN_GetError(&can),
+         (unsigned long)status.LastErrorCode,
+         (unsigned long)status.BusOff,
+         (unsigned long)status.ErrorPassive,
+         (unsigned long)status.Warning,
+         (unsigned long)HAL_FDCAN_GetTxFifoFreeLevel(&can));
+}
+
+static void CAN_DebugPrintRx(const CAN_BusMessage_t *message)
+{
+  uint16_t raw_id;
+
+  if (message == NULL) {
+    return;
+  }
+
+  raw_id = CAN_Bus_makeID(message->deviceId,
+                          message->messageId,
+                          message->priority);
+
+  printf("CAN RX: raw=0x%03X dest=0x%X type=0x%X priority=%u dlc=%u data=",
+         raw_id,
+         message->deviceId,
+         (unsigned int)message->messageId,
+         (unsigned int)message->priority,
+         message->dlc);
+
+  for (uint8_t i = 0U; i < message->dlc; i++) {
+    printf("%02X%s", message->data[i],
+           (i + 1U < message->dlc) ? " " : "");
+  }
+  printf("\r\n");
+}
+
+void LED_Toggle(void) { HAL_GPIO_TogglePin(LED_GPIO_Port, LED_Pin); }
+static uint32_t LED_TIMER = 0;
+
+void MotorController_OnFault(MotorFault_t fault)
+{
+  motor_fault_to_print = fault;
+}
+
+void HAL_GPIO_EXTI_Rising_Callback(uint16_t GPIO_Pin)
+{
+  if (GPIO_Pin == Diagnose_Pin) {
+    TMC_Stall_DiagISR(&stall);
+  }
+}
+
+void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim) 
+{
+  // millisecond timer
+  if (htim->Instance == TIM6) {
+    if (motor_control_ready != 0U) {
+      MotorController_Service_1kHz(&motor_controller);
+    }
+    RUN_EVERY(1000, LED_TIMER, LED_Toggle);
+
+  }
+}
+
+void HAL_TIM_OC_DelayElapsedCallback(TIM_HandleTypeDef *htim)
+{
+  Stepper_TIM_OC_Callback(htim);
+}
+
+void HAL_I2C_MemRxCpltCallback(I2C_HandleTypeDef *hi2c)
+{
+  AS5600_Done(&encoder, hi2c);
+  if ((hi2c == encoder.i2c) && encoderReadoutReq) {
+    encoderReadoutReady = true;
+  }
+}
+
+void HAL_I2C_ErrorCallback(I2C_HandleTypeDef *hi2c)
+{
+  AS5600_Fail(&encoder, hi2c);
+}
+
+void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart)
+{
+  if (huart == &debug_uart) {
+    /* Preserve the first unhandled command and ignore terminal line endings. */
+    printf("Uart rx");
+    if ((debug_uart_rx_byte != '\r') &&
+        (debug_uart_rx_byte != '\n') &&
+        (debug_rx_pending == 0U)) {
+      debug_rx_char = debug_uart_rx_byte;
+      debug_rx_pending = 1U;
+    }
+
+    (void)HAL_UART_Receive_IT(&debug_uart, &debug_uart_rx_byte, 1U);
+  }
+}
+
+void HAL_UART_ErrorCallback(UART_HandleTypeDef *huart) {
+  printf("error");
+  if (huart == &debug_uart) {
+    /* HAL ends interrupt reception after an error, so restart it. */
+    (void)HAL_UART_Receive_IT(&debug_uart, &debug_uart_rx_byte, 1U);
+  }
+}
+
+void HAL_FDCAN_RxFifo0Callback(FDCAN_HandleTypeDef *fdcan_handle, uint32_t RxFifo0ITs)
+{
+    if ((fdcan_handle == &can) && ((RxFifo0ITs & FDCAN_IT_RX_FIFO0_NEW_MESSAGE) != 0U)) {
+      CAN_BusMessage_t message = {0};
+
+      if (CAN_Bus_Receive(&can, &message) == HAL_OK) {
+        // CAN_DebugPrintRx(&message);
+
+        switch (CAN_Bus_GetMessageId(&message)) {
+          case CAN_ID_DEBUG:{
+            uint8_t debug_data = CAN_Bus_ReadU8(&message);
+
+            switch (debug_data) {
+              case 0x01:
+                printf("Reset command received\n");
+                NVIC_SystemReset();
+                break;
+              case 0x02:
+                encoderReadoutReady = false;
+                encoderReadoutReq = true;
+                break;
+            }
+            break;
+          }
+          case CAN_ID_COMMAND: {
+            uint32_t command = CAN_Bus_ReadU32(&message);
+            // uint32_t command = 0b000000010100000000001111000000001010;
+
+            // printf("Received message with command: %lu\n", (unsigned long)command);
+
+            uint16_t position_bits = (uint16_t)(command & 0x0FFFU);
+            uint16_t velocity_bits = (uint16_t)((command >> 12) & 0x0FFFU);
+
+            int16_t position = (position_bits & 0x0800U)
+                                   ? (int16_t)(position_bits - 0x1000U)
+                                   : (int16_t)position_bits;
+            int16_t velocity = (velocity_bits & 0x0800U)
+                                   ? (int16_t)(velocity_bits - 0x1000U)
+                                   : (int16_t)velocity_bits;
+            uint8_t tension = (uint8_t)((command >> 24) & 0xFFU);
+
+            printf("Received COMMAND message: position=%d, velocity=%d, tension=%u\n",
+                   position, velocity, tension);
+            
+
+            enqueue(&position_queue, position/1000.0f);
+            enqueue(&velocity_queue, velocity/100.0f);
+            enqueue(&tension_queue, tension/100.0f);
+
+            break;
+          }
+          case CAN_ID_SYNC: {
+            float position;
+            float velocity;
+            float tension;
+            if (dequeue(&position_queue, &position) &&
+                dequeue(&velocity_queue, &velocity) &&
+                dequeue(&tension_queue, &tension)) {
+              /* Do not use blocking UART prints inside the FDCAN ISR. */
+              float delta_counts;
+              int32_t target_counts;
+
+              /*
+               * Each CAN position is the displacement since the previous
+               * 100 ms sample, not an absolute offset from startup.
+               */
+              delta_counts = position * ENCODER_COUNTS_PER_MM;
+              printf("deque delta: ");
+              PrintFloat3(delta_counts);
+              printf("\r\n");
+              can_target_counts_accumulator += delta_counts;
+              target_counts = (can_target_counts_accumulator >= 0.0f)
+                                  ? (int32_t)(can_target_counts_accumulator + 0.5f)
+                                  : (int32_t)(can_target_counts_accumulator - 0.5f);
+
+      MotorController_SetTimedTarget(&motor_controller,
+                                            target_counts,
+                                            MOTOR_COMMAND_INTERVAL_S);
+            } else {
+              printf("SYNC received, but a command queue is empty\r\n");
+            }
+            break;
+          }
+          case CAN_ID_INIT: {
+            int16_t angle_ticks = (int16_t)CAN_Bus_ReadU16(&message);
+            MotorController_SetTarget(&motor_controller,
+                                              (int32_t)angle_ticks,
+                                              0.0f);
+            break;
+          }
+          default: {
+            
+            printf("Received message with unhandled ID: 0x%03lX\r \tPriority: 0x%03lX\n", (unsigned long)CAN_Bus_GetMessageId(&message), (unsigned long)CAN_Bus_GetPriority(&message));
+            break;
+          }
+          }
+        } else {
+        // CAN_DebugPrintState("RX read failed");
+      }
+    }
+}
+
+// #region Helper Functions
+static void PrintFloat3(float value)
+{
+    int32_t scaled = (value >= 0.0f) ? (int32_t)(value * 1000.0f + 0.5f)
+                                     : (int32_t)(value * 1000.0f - 0.5f);
+    uint32_t magnitude = (scaled < 0) ? (uint32_t)(-(int64_t)scaled)
+                                      : (uint32_t)scaled;
+
+    if (scaled < 0) {
+        printf("-");
+    }
+    printf("%lu.%03lu", (unsigned long)(magnitude / 1000U),
+           (unsigned long)(magnitude % 1000U));
+}
+
+static void TMC2209_ConfigUartHandle(void)
+{
+    tmc.huart = &tmc_uart;
+    tmc.enn_port = Driver_disable_GPIO_Port;
+    tmc.enn_pin = Driver_disable_Pin;
+    tmc.slave_addr = ID & 0x00U; // MS1/MS2 pins determine address in range 0..3
+}
+
+// #endregion
 
 /* USER CODE END 0 */
 
@@ -102,23 +446,177 @@ int main(void)
 
   /* Initialize all configured peripherals */
   MX_GPIO_Init();
+  MX_DMA_Init();
   MX_ADC1_Init();
   MX_FDCAN1_Init();
   MX_I2C1_Init();
   MX_TIM2_Init();
   MX_USART1_UART_Init();
   MX_USART2_UART_Init();
+  MX_TIM6_Init();
   /* USER CODE BEGIN 2 */
+
+  initQueue(&position_queue);
+  initQueue(&velocity_queue);
+  initQueue(&tension_queue);
+
+  ID = (HAL_GPIO_ReadPin(S1_GPIO_Port, S1_Pin) << 3) |
+       (HAL_GPIO_ReadPin(S2_GPIO_Port, S2_Pin) << 2) |
+       (HAL_GPIO_ReadPin(S3_GPIO_Port, S3_Pin) << 1) |
+       (HAL_GPIO_ReadPin(S4_GPIO_Port, S4_Pin));
+
+  // #region Print System Details
+  printf("\n####################### SYSTEM DETAILS ########################\n");
+  uint32_t sys_clock_hz = HAL_RCC_GetSysClockFreq();
+  uint32_t sys_clock_mhz = sys_clock_hz / 1000000U;
+  uint32_t sys_clock_mhz_fraction =
+      ((sys_clock_hz % 1000000U) * 100U + 500000U) / 1000000U;
+
+  printf("Sys clock: %lu.%02lu MHz\n",
+         (unsigned long)sys_clock_mhz,
+         (unsigned long)sys_clock_mhz_fraction);
+  PrintTimerFrequency("TIM2(step_timer)", &step_timer, 1U);
+  PrintTimerFrequency("TIM6(ms_Timer)", &ms_timer, 1U);
+  printf("#################################################################\n");
+  HAL_Delay(500);
+
+  printf("\n####################### SYSTEM INIT ########################\n");
+  printf("Controller ID : ");
+  printf("%01X\n", ID);
+  printf("ms timer init : ");
+  printf(HAL_TIM_Base_Start_IT(&ms_timer) ? "Failed\n" : "Success\n");
+
+  printf("debug UART RX interrupt : ");
+  printf(HAL_UART_Receive_IT(&debug_uart, &debug_uart_rx_byte, 1U) != HAL_OK
+             ? "Failed\n"
+             : "Success\n");
+
+  Stepper_Init();
+  printf("stepper init : Success\n");
+
+  AS5600_Init(&encoder, &encoder_i2c);
+  printf("AS5600 first read : ");
+  printf(AS5600_Read(&encoder) ? "Failed\n" : "Started\n");
+
+  printf("CAN init : ");
+  HAL_StatusTypeDef can_init_status = CAN_Bus_Init(&can, ID);
+  printf(can_init_status != HAL_OK ? "Failed\n" : "Success\n");
+  printf("CAN filters: local destination=0x%X, broadcast destination=0x%X, mask=0x00F\r\n",
+         ID, CAN_BROADCAST_ID);
+  CAN_DebugPrintState("after init");
+
+  TMC2209_ConfigUartHandle();
+  printf("TMC UART init : ");
+  printf(TMC2209_Init(&tmc) ? "Failed\n" : "Success\n");
+
+  printf("TMC send delay : ");
+  printf(TMC2209_SetSendDelay(&tmc, 8) ? "Failed\n" : "Success\n");
+
+  printf("TMC microsteps (1/32) : ");
+  printf(TMC2209_SetMicrosteps(&tmc,
+                              TMC2209_MICROSTEP_32,
+                              false) != HAL_OK
+             ? "Failed\n"
+             : "Success\n");
+
+  printf("TMC StallGuard config : ");
+  printf(TMC_Stall_Init(&stall, &tmc, &motor_controller) ? "Failed\n" : "Success\n");
+
+  uint32_t ioin = 0;
+  printf("TMC Check Connection : ");
+  printf(TMC2209_CheckConnection(&tmc, &ioin) ? "Failed\n" : "Success\n");
+  printf("(%08lX)\n", (unsigned long)ioin);
+
+  MotorController_Init(&motor_controller);
+  MotorController_ApplyConfig(&motor_controller, &motor_config);
+  MotorController_Enable(&motor_controller);
+  motor_control_ready = 1U;
+  can_target_counts_accumulator =
+      (float)MotorController_GetActualPosition(&motor_controller);
+  printf("PID position control : Success\n");
+  printf("Kp/Ki/Kd : %ld/%ld/%ld milli\n",
+         (long)(MOTOR_KP * 1000.0f),
+         (long)(MOTOR_KI * 1000.0f),
+         (long)(MOTOR_KD * 1000.0f));
+
+  printf("\n############################################################\n\n");
+  // #endregion
 
   /* USER CODE END 2 */
 
   /* Infinite loop */
   /* USER CODE BEGIN WHILE */
+  bool monitor = true;
+  uint32_t status_print_tick = HAL_GetTick();
   while (1)
   {
     /* USER CODE END WHILE */
 
     /* USER CODE BEGIN 3 */
+
+    if (debug_rx_pending != 0U) {
+      uint8_t command = debug_rx_char;
+      debug_rx_pending = 0U;
+
+      printf("Debug command received: %c\r\n", command);
+      switch (command) {
+        case 'R':
+          NVIC_SystemReset();
+          break;
+        case 'D':
+          Stepper_Disable();
+          break;
+        case 'E':
+          Stepper_Enable();
+          break;
+        case 'S':
+          monitor = !monitor;
+          break;
+      }
+    }
+
+    if (encoderReadoutReq) {
+      if (encoderReadoutReady) {
+        uint16_t encoderData =
+            ((uint16_t)(ID & 0x0FU) << 12) |
+            (AS5600_Raw(&encoder) & 0x0FFFU);
+
+        encoderReadoutReq = false;
+        encoderReadoutReady = false;
+        (void)CAN_Bus_SendU16(&can,
+                              HOST_CAN_ID,
+                              CAN_ID_ENCODER,
+                              CAN_Priority_MEDIUM,
+                              encoderData);
+      } else if (!AS5600_Busy(&encoder)) {
+        (void)AS5600_Read(&encoder);
+      }
+    }
+
+    if (motor_fault_to_print != MOTOR_FAULT_NONE) {
+      MotorFault_t fault = motor_fault_to_print;
+      motor_fault_to_print = MOTOR_FAULT_NONE;
+      printf("MOTOR FAULT: %s (%ld)\n",
+             MotorController_FaultName(fault),
+             (long)fault);
+    }
+
+    if (MotorController_MonitorPending(&motor_controller) != 0U && monitor) {
+      MotorController_PrintMonitor(&motor_controller);
+      printf("encoder mon: raw=%u abs=%ld ready=%u busy=%u error=%u\r\n",
+             (unsigned int)AS5600_Raw(&encoder),
+             (long)AS5600_Abs(&encoder),
+             (unsigned int)AS5600_Ready(&encoder),
+             (unsigned int)AS5600_Busy(&encoder),
+             (unsigned int)AS5600_Error(&encoder));
+    }
+
+    if ((HAL_GetTick() - status_print_tick) >= 1000U) {
+      status_print_tick += 1000U;
+      printf("size: %lu/%lu\r\n",
+             (unsigned long)queueSize(&position_queue),
+             (unsigned long)queueCapacity());
+    }
   }
   /* USER CODE END 3 */
 }
@@ -245,20 +743,20 @@ static void MX_FDCAN1_Init(void)
   /* USER CODE END FDCAN1_Init 1 */
   hfdcan1.Instance = FDCAN1;
   hfdcan1.Init.ClockDivider = FDCAN_CLOCK_DIV1;
-  hfdcan1.Init.FrameFormat = FDCAN_FRAME_FD_NO_BRS;
+  hfdcan1.Init.FrameFormat = FDCAN_FRAME_CLASSIC;
   hfdcan1.Init.Mode = FDCAN_MODE_NORMAL;
-  hfdcan1.Init.AutoRetransmission = ENABLE;
-  hfdcan1.Init.TransmitPause = ENABLE;
+  hfdcan1.Init.AutoRetransmission = DISABLE;
+  hfdcan1.Init.TransmitPause = DISABLE;
   hfdcan1.Init.ProtocolException = DISABLE;
-  hfdcan1.Init.NominalPrescaler = 16;
+  hfdcan1.Init.NominalPrescaler = 8;
   hfdcan1.Init.NominalSyncJumpWidth = 1;
-  hfdcan1.Init.NominalTimeSeg1 = 1;
-  hfdcan1.Init.NominalTimeSeg2 = 1;
+  hfdcan1.Init.NominalTimeSeg1 = 13;
+  hfdcan1.Init.NominalTimeSeg2 = 2;
   hfdcan1.Init.DataPrescaler = 1;
   hfdcan1.Init.DataSyncJumpWidth = 1;
   hfdcan1.Init.DataTimeSeg1 = 1;
   hfdcan1.Init.DataTimeSeg2 = 1;
-  hfdcan1.Init.StdFiltersNbr = 0;
+  hfdcan1.Init.StdFiltersNbr = 2;
   hfdcan1.Init.ExtFiltersNbr = 0;
   hfdcan1.Init.TxFifoQueueMode = FDCAN_TX_FIFO_OPERATION;
   if (HAL_FDCAN_Init(&hfdcan1) != HAL_OK)
@@ -339,9 +837,9 @@ static void MX_TIM2_Init(void)
 
   /* USER CODE END TIM2_Init 1 */
   htim2.Instance = TIM2;
-  htim2.Init.Prescaler = 0;
+  htim2.Init.Prescaler = 64-1;
   htim2.Init.CounterMode = TIM_COUNTERMODE_UP;
-  htim2.Init.Period = 4294967295;
+  htim2.Init.Period = 0xFFFFFFFF;
   htim2.Init.ClockDivision = TIM_CLOCKDIVISION_DIV1;
   htim2.Init.AutoReloadPreload = TIM_AUTORELOAD_PRELOAD_DISABLE;
   if (HAL_TIM_Base_Init(&htim2) != HAL_OK)
@@ -363,7 +861,7 @@ static void MX_TIM2_Init(void)
   {
     Error_Handler();
   }
-  sConfigOC.OCMode = TIM_OCMODE_TIMING;
+  sConfigOC.OCMode = TIM_OCMODE_TOGGLE;
   sConfigOC.Pulse = 0;
   sConfigOC.OCPolarity = TIM_OCPOLARITY_HIGH;
   sConfigOC.OCFastMode = TIM_OCFAST_DISABLE;
@@ -375,6 +873,44 @@ static void MX_TIM2_Init(void)
 
   /* USER CODE END TIM2_Init 2 */
   HAL_TIM_MspPostInit(&htim2);
+
+}
+
+/**
+  * @brief TIM6 Initialization Function
+  * @param None
+  * @retval None
+  */
+static void MX_TIM6_Init(void)
+{
+
+  /* USER CODE BEGIN TIM6_Init 0 */
+
+  /* USER CODE END TIM6_Init 0 */
+
+  TIM_MasterConfigTypeDef sMasterConfig = {0};
+
+  /* USER CODE BEGIN TIM6_Init 1 */
+
+  /* USER CODE END TIM6_Init 1 */
+  htim6.Instance = TIM6;
+  htim6.Init.Prescaler = 64-1;
+  htim6.Init.CounterMode = TIM_COUNTERMODE_UP;
+  htim6.Init.Period = 1000-1;
+  htim6.Init.AutoReloadPreload = TIM_AUTORELOAD_PRELOAD_DISABLE;
+  if (HAL_TIM_Base_Init(&htim6) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  sMasterConfig.MasterOutputTrigger = TIM_TRGO_RESET;
+  sMasterConfig.MasterSlaveMode = TIM_MASTERSLAVEMODE_DISABLE;
+  if (HAL_TIMEx_MasterConfigSynchronization(&htim6, &sMasterConfig) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  /* USER CODE BEGIN TIM6_Init 2 */
+
+  /* USER CODE END TIM6_Init 2 */
 
 }
 
@@ -475,6 +1011,22 @@ static void MX_USART2_UART_Init(void)
 }
 
 /**
+  * Enable DMA controller clock
+  */
+static void MX_DMA_Init(void)
+{
+
+  /* DMA controller clock enable */
+  __HAL_RCC_DMA1_CLK_ENABLE();
+
+  /* DMA interrupt init */
+  /* DMA1_Channel1_IRQn interrupt configuration */
+  HAL_NVIC_SetPriority(DMA1_Channel1_IRQn, 0, 0);
+  HAL_NVIC_EnableIRQ(DMA1_Channel1_IRQn);
+
+}
+
+/**
   * @brief GPIO Initialization Function
   * @param None
   * @retval None
@@ -538,6 +1090,10 @@ static void MX_GPIO_Init(void)
   GPIO_InitStruct.Pull = GPIO_NOPULL;
   GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
   HAL_GPIO_Init(GPIOB, &GPIO_InitStruct);
+
+  /* EXTI interrupt init*/
+  HAL_NVIC_SetPriority(EXTI2_3_IRQn, 0, 0);
+  HAL_NVIC_EnableIRQ(EXTI2_3_IRQn);
 
   /* USER CODE BEGIN MX_GPIO_Init_2 */
 

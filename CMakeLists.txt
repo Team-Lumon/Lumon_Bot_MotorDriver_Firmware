@@ -36,6 +36,14 @@ add_executable(${CMAKE_PROJECT_NAME})
 
 # Add STM32CubeMX generated sources
 add_subdirectory(cmake/stm32cubemx)
+add_subdirectory(Libs/can_bus)
+add_subdirectory(Libs/debug_helper)
+add_subdirectory(Libs/tmc2209)
+add_subdirectory(Libs/tmc_stall)
+add_subdirectory(Libs/as5600)
+add_subdirectory(Libs/motor_controller)
+add_subdirectory(Libs/stepper_oc)
+add_subdirectory(Libs/queue)
 
 # Link directories setup
 target_link_directories(${CMAKE_PROJECT_NAME} PRIVATE
@@ -65,4 +73,12 @@ target_link_libraries(${CMAKE_PROJECT_NAME}
     stm32cubemx
 
     # Add user defined libraries
+    can_bus
+    debug_helper
+    tmc2209
+    tmc_stall
+    as5600
+    motor_controller
+    stepper_oc
+    queue
 )
